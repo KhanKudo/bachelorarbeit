@@ -1,4 +1,17 @@
 # Projektarbeit: Hochverfügbare IoT Systeme
 
-> [!NOTE]
-> Work In Progress
+![Systemübersicht](/expose/graphic.png)
+
+Das Ziel der ersten Projektarbeitsphase ist es eine redundante **IoT Cloud** Lösung zu entwickeln. Hierbei sollen zwei Server einen aktiv/passiv Redundanzcluster bilden, um selbst bei einem begrenzten Ausfallszenario, weiterhin den vollen Service anbieten zu können.
+
+Für die Kommunikation wurde [MQTT](https://mqtt.org/) mittels dem [Mosquitto Broker](https://mosquitto.org/) gewählt, da es die einfachste und populärste Methode ist. Für die Redudanz auch wichtig, da Mosquitto mittels der autosave Funktion in-memory Daten auch am Filesystem abspeichern kann und dadurch perfekt geeignet ist für einen aktiv/passiv Betrieb. EMQX wurde ebenfalls berücksichtigt, es ist aber ausschließlich aktiv/aktiv betriebsfähig. Mosquitto's MQTT-Bridge Funktionalität wurde ebenfalls betrachetet, diese ist aber nicht einsetzbar, wenn die Datenbank bereits mittels DRBD synchronisiert wird, da die passive Instanz niemals gleichzeitig laufen darf.
+
+Für die historische Datenverwaltung sowie Datenvisualisierung wurde [Home Assistant](https://www.home-assistant.io/) gewählt, da es die häufigste Lokal-Lösung ist und eine Vielfalt an Funktionalität mit geringstem Einrichtungsaufwand anbietet. Home Assistant soll außerdem auch die Verantwortung für das ausführen von Automationen übernehmen.
+
+Als klassischer Sensor & Aktuator werden [ESP32C6](https://www.seeedstudio.com/Seeed-Studio-XIAO-ESP32C6-p-5884.html) Mikrocontroller eingesetzt. Ein Temperatur und Luftfeuchtigkeitssensor und ein RGB-fähiges LED-Licht. Diese Werte werden historisch aufgezeichnet, bieten schöne Dashboards und können zum Präsentieren der Automationsfähigkeit fantastisch genutzt werden.
+
+Für das Darstellen der Redundanzfähigkeit wird Project IoNoW eingesetzt. Es ist eine zeitkritische MQTT-Anwendung, entwickelt in dem letzten Semester, wo auch nur 50 Millisekunden an Verzögerung, wie etwa bei einem Failover, klar zu spüren sind. Mehr Details dazu können auf GitHub gefunden werden.
+
+Der Zugriff auf die Server wird über [HAProxy](https://www.haproxy.com/documentation/haproxy-configuration-manual/latest/intro/#3), agierend als eine [Reverse-Proxy](https://en.wikipedia.org/wiki/Reverse_proxy), implementiert. MQTT sowie Home Assistant werden unter eigenen Benutzern als rootless [Podman](https://podman.io/) Container betrieben. Die [SSL/TLS Zertifikate](https://www.digicert.com/what-is-an-ssl-certificate) für die sichere Kommunikation werden kostenfrei von [Lets-Encrypt](https://letsencrypt.org/) erworben.
+
+Für die Verwaltung der Cluster-Ressourcen und die Betätigung eines Failovers wird die klassische [pacemaker-corosync](https://techadminblog.com/pacemaker-corosync-cluster-overview/) Kombo genutzt. Dabei wird das [DRBD](https://en.wikipedia.org/wiki/DRBD) Blockdevice mit dem Filesystem aktiviert, die Podman Container werden hochgefahren, und das Shared NIC wird aktiviert. Für die einfachere Verwaltung der Maschinen und ein leichtes Nachbauen werden [Proxmox](https://www.proxmox.com/en/products/proxmox-virtual-environment/features) VMs statt physischen Geräten genutzt. Um das [Quorum-Problem](https://www.alteeve.com/w/The_2-Node_Myth) eines two-node Clusters etwas zu umgehen, wird das [STONITH](https://documentation.suse.com/sle-ha/12-SP5/html/SLE-HA-all/cha-ha-fencing.html)-Verfahren eingesetzt, um [Split-Brain](https://www.45drives.com/community/articles/what-is-split-brain/) Szenarien zu minimieren.
