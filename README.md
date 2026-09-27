@@ -10,7 +10,7 @@ Für die historische Datenverwaltung sowie Datenvisualisierung wurde [Home Assis
 
 Als klassischer Sensor & Aktuator werden [ESP32C6](https://www.seeedstudio.com/Seeed-Studio-XIAO-ESP32C6-p-5884.html) Mikrocontroller eingesetzt. Ein Temperatur und Luftfeuchtigkeitssensor und ein RGB-fähiges LED-Licht. Diese Werte werden historisch aufgezeichnet, bieten schöne Dashboards und können zum Präsentieren der Automationsfähigkeit fantastisch genutzt werden.
 
-Für das Darstellen der Redundanzfähigkeit wird Project IoNoW eingesetzt. Es ist eine zeitkritische MQTT-Anwendung, entwickelt in dem letzten Semester, wo auch nur 50 Millisekunden an Verzögerung, wie etwa bei einem Failover, klar zu spüren sind. Mehr Details dazu können auf GitHub gefunden werden.
+Für das Darstellen der Redundanzfähigkeit wird [Project IoNoW](https://github.com/KhanKudo/setu-iot-2026) eingesetzt. Es ist eine zeitkritische MQTT-Anwendung, entwickelt in dem letzten Semester, wo auch nur 50 Millisekunden an Verzögerung, wie etwa bei einem Failover, klar zu spüren sind. Mehr Details dazu können auf GitHub gefunden werden.
 
 Der Zugriff auf die Server wird über [HAProxy](https://www.haproxy.com/documentation/haproxy-configuration-manual/latest/intro/#3), agierend als eine [Reverse-Proxy](https://en.wikipedia.org/wiki/Reverse_proxy), implementiert. MQTT sowie Home Assistant werden unter eigenen Benutzern als rootless [Podman](https://podman.io/) Container betrieben. Die [SSL/TLS Zertifikate](https://www.digicert.com/what-is-an-ssl-certificate) für die sichere Kommunikation werden kostenfrei von [Lets-Encrypt](https://letsencrypt.org/) erworben.
 
