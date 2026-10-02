@@ -1,87 +1,5 @@
 steps:
-  - name: Konfiguriere Default DNS
-    user: root
-    env:
-      - DNS
-    check: |
-      grep -qE '^nameserver ' /etc/resolv.conf
-    script: |
-      echo -e "nameserver $DNS" > /etc/resolv.conf
-
-      apt-get update -y
-  - name: Konfiguriere System NTP
-    user: root
-    check: |
-      systemctl is-active systemd-timesyncd
-    script: |
-      apt-get update -y
-      apt-get install -y systemd-timesyncd
-
-      systemctl enable --now systemd-timesyncd
-  - name: Konfiguriere Hostnamen
-    user: root
-    check: |
-      [[ "$(hostnamectl hostname)" == "node1" ]]
-    script: |
-      hostnamectl hostname node1
-      sed -Ei "s/127.0.1.1\s+.+/127.0.1.1\tnode1/" /etc/hosts
-  - name: Installiere Basispakete
-    user: root
-    check: |
-      for pkg in sudo vim tree tcpdump conntrack traceroute nftables curl wget openssl ca-certificates gnupg qemu-guest-agent; do dpkg -s "$pkg"; done
-    script: |
-      apt-get install -y sudo vim tree tcpdump conntrack traceroute nftables curl wget openssl ca-certificates gnupg qemu-guest-agent
-  - name: Installiere DRBD
-    user: root
-    check: |
-      dpkg -s drbd-utils
-    script: |
-      apt-get install drbd-utils
-  - name: Konfiguriere DRBD Partition
-    user: root
-    env:
-      - DEV
-      - SECRET
-      - IP1
-      - IP2
-    check: |
-      [ -e /etc/drbd.conf ] && [ -e /dev/drbd0 ]
-    script: |
-      cat > /etc/drbd.conf <<-EOF
-      global { usage-count no; }
-      common { syncer { rate 100M; } }
-      resource r0 {
-              protocol C;
-              startup {
-                      wfc-timeout  15;
-                      degr-wfc-timeout 60;
-              }
-              net {
-                      cram-hmac-alg sha1;
-                      shared-secret "$SECRET";
-              }
-              on node1 {
-                      device /dev/drbd0;
-                      disk $DEV;
-                      address $IP1:7788;
-                      meta-disk internal;
-              }
-              on node2 {
-                      device /dev/drbd0;
-                      disk $DEV;
-                      address $IP2:7788;
-                      meta-disk internal;
-              }
-      }
-      EOF
-
-      umount "$DEV" || true
-
-      wipefs -a "$DEV"
-
-      drbdadm --force create-md r0
-
-      systemctl start drbd
+  - ref: base
   - name: Aktiviere DRBD Primary
     user: root
     check: |
@@ -92,147 +10,33 @@ steps:
       mkdir -p /home
       mkfs -t ext4 /dev/drbd0
       mount /dev/drbd0 /home
-  - name: Konfiguriere Netzwerkinterfaces
-    user: root
-    env:
-      - IP
-      - GATEWAY
-      - DNS
-    check: |
-      [ -e /etc/systemd/network/ens18.network ] && dpkg -s systemd-resolved
-    script: |
-      systemctl disable --now networking || :
-      systemctl mask networking || :
-
-      cat > /etc/network/interfaces <<-EOF
-      auto lo
-      iface lo inet loopback
-      EOF
-
-      cat > /etc/systemd/network/ens18.network <<-EOF
-      [Match]
-      Name=ens18
-
-      [Network]
-      Address=$IP
-      Gateway=$GATEWAY
-      DNS=$DNS
-      IPv6AcceptRA=no
-      LinkLocalAddressing=no
-      EOF
-
-      systemctl unmask systemd-networkd systemd-networkd-wait-online || :
-
-      systemctl restart systemd-networkd
-      systemctl enable --now systemd-networkd systemd-networkd-wait-online
-
-      apt-get update -y
-      apt-get install -y systemd-resolved
-      systemctl enable --now systemd-resolved
-
-      systemctl restart network-online.target
-  - name: Installiere Podman
+  - name: Konfiguriere /home/hammer
     user: root
     check: |
-      dpkg -s podman
+      [ -e /home/hammer/.config/containers ] && [ -e /home/hammer/quadlet ]  && [ -e /home/hammer/.bashrc ] && [[ "$(stat -c '%a %u:%g' /home/hammer)" == '700 955:955' ]]
     script: |
-      apt-get -y install podman
-  - name: Erstelle Hilfskript "user" in /root/.bashrc
-    user: root
-    script: |
-      cat >> /root/.bashrc <<-'EOF'
-      user() {
-        local target_user path_real
+      mkdir -p /home/hammer/.config/containers
+      mkdir -p /home/hammer/quadlet
+      ln -s /home/hammer/quadlet /home/hammer/.config/containers/systemd
 
-        if [[ -n "$1" ]]; then
-            # Explicit user passed as argument
-            target_user="$1"
-        else
-            # Fall back to path-based detection
-            path_real="$(realpath -q "$PWD")"
-
-            if [[ "$path_real" != /home/* ]]; then
-                echo "Error: Not inside a /home tree and no target user specified." >&2
-                ls -lh /home
-                return 1
-            fi
-
-            target_user="$(echo "$path_real" | cut -d'/' -f3)"
-
-            if [[ -z "$target_user" ]]; then
-                echo "Error: Currently at root of /home, no target user detected." >&2
-                return 1
-            fi
-        fi
-
-        # Verify target user exists
-        if ! id "$target_user" &>/dev/null; then
-            echo "Error: User '$target_user' does not exist on this system." >&2
-            return 1
-        fi
-
-        # Guard against switching to self
-        if [[ "$target_user" == "$USER" ]]; then
-            echo "Info: Already operating as user '$target_user'." >&2
-            return 0
-        fi
-
-        # Execute shell switch
-        [[ -n "$1" ]] && cd "/home/$target_user"
-        sudo su -s /bin/bash "$target_user"
-      }
-      EOF
-  - name: Erstelle Benutzer
-    user: root
-    for: USERS
-    script: |
-      id -u "$value" && exit 190 || :
-
-      # requires default /etc/login.defs: SUB_UID_COUNT 65536  &&  SUB_GID_COUNT 65536
-      useradd -rms /usr/sbin/nologin "$value"
-
-      # Calculate next free 65536 block from existing /etc/subuid entries
-      LAST_UID=$(tail -n 1 /etc/subuid | cut -d: -f2)
-      LAST_COUNT=$(tail -n 1 /etc/subuid | cut -d: -f3)
-      START_ID=$((LAST_UID + LAST_COUNT))
-      END_ID=$((START_ID + 65535))
-
-      usermod --add-subuids "${START_ID}-${END_ID}" --add-subgids "${START_ID}-${END_ID}" "$value"
-
-      loginctl enable-linger "$value"
-
-      mkdir -p "/home/$value/.config/containers"
-      mkdir -p "/home/$value/quadlet"
-      ln -s "/home/$value/quadlet" "/home/$value/.config/containers/systemd"
-
-      cat >> "/home/$value/.bashrc" <<-'EOF'
+      cat >> /home/hammer/.bashrc <<-'EOF'
       export XDG_RUNTIME_DIR="/run/user/$UID"
       export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
       alias systemctl='systemctl --user'
       EOF
 
-      chown -R "$value:$value" "/home/$value"
-  - name: Installiere HAProxy
-    user: root
-    check: |
-        for pkg in haproxy-awslc socat; do dpkg -s "$pkg"; done
-    script: |
-      mkdir -p /home/haproxy/ssl
-      ln -s /home/haproxy /etc/haproxy
-
-      install -d -m 0755 /usr/share/keyrings
-      wget -qO /usr/share/keyrings/HAPROXY-key-community.asc https://www.haproxy.com/download/haproxy/HAPROXY-key-community.asc
-
-      echo "deb [arch=amd64 signed-by=/usr/share/keyrings/HAPROXY-key-community.asc] https://www.haproxy.com/download/haproxy/performance/debian/ha34 trixie main" | tee /etc/apt/sources.list.d/haproxy.list
-
-      apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy-awslc socat
-
-      chown haproxy:haproxy -R /home/haproxy
-      chmod o-rwx -R /home/haproxy
+      chown -R hammer:hammer /home/hammer
+      chmod 700 /home/hammer
   - name: Konfiguriere HAProxy
     user: root
+    check: |
+      [ -e /etc/haproxy/haproxy.cfg ] && [ -L /etc/haproxy ]
     script: |
+      mkdir -p /etc/haproxy/ssl
+
+      mv /etc/haproxy /home/haproxy
+      ln -s /home/haproxy /etc/haproxy
+
       cat > /etc/haproxy/haproxy.cfg <<-EOF
       global
        	log /dev/log	local0
@@ -292,7 +96,7 @@ steps:
   - name: Starte HAProxy
     user: root
     script: |
-      systemctl is-active haproxy && systemctl reload haproxy || systemctl restart haproxy
+      systemctl is-active haproxy && systemctl reload haproxy || systemctl enable --now haproxy
   - name: Konfiguriere internes Podman Netzwerk
     user: hammer
     script: |

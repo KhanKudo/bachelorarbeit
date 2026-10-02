@@ -1,0 +1,236 @@
+steps:
+  - name: Konfiguriere Default DNS
+    user: root
+    env:
+      - DNS
+    check: |
+      grep -qE '^nameserver ' /etc/resolv.conf
+    script: |
+      echo -e "nameserver $DNS" > /etc/resolv.conf
+
+      apt-get update -y
+  - name: Konfiguriere System NTP
+    user: root
+    check: |
+      systemctl is-active systemd-timesyncd
+    script: |
+      apt-get update -y
+      apt-get install -y systemd-timesyncd
+
+      systemctl enable --now systemd-timesyncd
+  - name: Konfiguriere Hostnamen
+    user: root
+    env:
+      - IP1
+      - IP2
+    check: |
+      if ip addr | grep -qE "inet $IP1/"; then
+          [[ "$(hostnamectl hostname)" == "node1" ]]
+      elif ip addr | grep -qE "inet $IP2/"; then
+          [[ "$(hostnamectl hostname)" == "node2" ]]
+      else
+          echo "Machine's IP neither matches IP1 nor IP2: $IP1 nor $IP2 "
+          exit 99
+      fi
+    script: |
+      host=""
+      if ip addr | grep -qE "inet $IP1/"; then
+          host="node1"
+      elif ip addr | grep -qE "inet $IP2/"; then
+          host="node2"
+      else
+          echo "Machine's IP neither matches IP1 nor IP2: $IP1 nor $IP2 "
+          exit 99
+      fi
+
+      hostnamectl hostname "$host"
+      sed -Ei "s/127.0.1.1\s+.+/127.0.1.1\t$host/" /etc/hosts
+  - name: Installiere Basispakete
+    user: root
+    check: |
+      for pkg in sudo vim tree tcpdump conntrack traceroute nftables curl wget openssl ca-certificates gnupg qemu-guest-agent; do dpkg -s "$pkg"; done
+    script: |
+      apt-get install -y sudo vim tree tcpdump conntrack traceroute nftables curl wget openssl ca-certificates gnupg qemu-guest-agent
+  - name: Installiere DRBD
+    user: root
+    check: |
+      dpkg -s drbd-utils
+    script: |
+      apt-get install drbd-utils
+  - name: Konfiguriere Netzwerkinterfaces
+    user: root
+    env:
+      - IP1
+      - IP2
+      - GATEWAY
+      - DNS
+    check: |
+      [ -e /etc/systemd/network/ens18.network ] && dpkg -s systemd-resolved
+    script: |
+      IP="$([[ "$(hostnamectl hostname)" == 'node1' ]] && echo -n "$IP1" || echo -n "$IP2")"
+      CIDR="$(ip addr | grep -E "inet $IP/" | xargs | cut -d' ' -f2)"
+
+      cat > /etc/systemd/network/ens18.network <<-EOF
+      [Match]
+      Name=ens18
+
+      [Network]
+      Address=$CIDR
+      Gateway=$GATEWAY
+      DNS=$DNS
+      IPv6AcceptRA=no
+      LinkLocalAddressing=no
+      EOF
+
+      systemctl disable --now networking || :
+      systemctl mask networking || :
+
+      cat > /etc/network/interfaces <<-EOF
+      auto lo
+      iface lo inet loopback
+      EOF
+
+      systemctl unmask systemd-networkd systemd-networkd-wait-online || :
+
+      systemctl restart systemd-networkd
+      systemctl enable --now systemd-networkd systemd-networkd-wait-online
+
+      apt-get update -y
+      apt-get install -y systemd-resolved
+      systemctl enable --now systemd-resolved
+
+      systemctl restart network-online.target
+  - name: Installiere Podman
+    user: root
+    check: |
+      dpkg -s podman
+    script: |
+      apt-get -y install podman
+  - name: Erstelle Hilfsskript "user" in /root/.bashrc
+    user: root
+    script: |
+      cat >> /root/.bashrc <<-'EOF'
+      user() {
+        local target_user path_real
+
+        if [[ -n "$1" ]]; then
+            # Explicit user passed as argument
+            target_user="$1"
+        else
+            # Fall back to path-based detection
+            path_real="$(realpath -q "$PWD")"
+
+            if [[ "$path_real" != /home/* ]]; then
+                echo "Error: Not inside a /home tree and no target user specified." >&2
+                ls -lh /home
+                return 1
+            fi
+
+            target_user="$(echo "$path_real" | cut -d'/' -f3)"
+
+            if [[ -z "$target_user" ]]; then
+                echo "Error: Currently at root of /home, no target user detected." >&2
+                return 1
+            fi
+        fi
+
+        # Verify target user exists
+        if ! id "$target_user" &>/dev/null; then
+            echo "Error: User '$target_user' does not exist on this system." >&2
+            return 1
+        fi
+
+        # Guard against switching to self
+        if [[ "$target_user" == "$USER" ]]; then
+            echo "Info: Already operating as user '$target_user'." >&2
+            return 0
+        fi
+
+        # Execute shell switch
+        [[ -n "$1" ]] && cd "/home/$target_user"
+        sudo su -s /bin/bash "$target_user"
+        [[ -n "$1" ]] && cd "$OLDPWD"
+      }
+      EOF
+  - name: Installiere HAProxy
+    user: root
+    check: |
+        for pkg in haproxy-awslc socat; do dpkg -s "$pkg"; done
+    script: |
+      install -d -m 0755 /usr/share/keyrings
+      wget -qO /usr/share/keyrings/HAPROXY-key-community.asc https://www.haproxy.com/download/haproxy/HAPROXY-key-community.asc
+
+      echo "deb [arch=amd64 signed-by=/usr/share/keyrings/HAPROXY-key-community.asc] https://www.haproxy.com/download/haproxy/performance/debian/ha34 trixie main" | tee /etc/apt/sources.list.d/haproxy.list
+
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy-awslc socat
+
+      # TODO: ensure uid:gid of haproxy is fixed
+
+      chown haproxy:haproxy -R /etc/haproxy
+      chmod o-rwx -R /etc/haproxy
+
+      systemctl disable --now haproxy
+  - name: Konfiguriere DRBD Partition
+    user: root
+    env:
+      - DEV
+      - SECRET
+      - IP1
+      - IP2
+    check: |
+      [ -e /etc/drbd.conf ] && [ -e /dev/drbd0 ]
+    script: |
+      cat > /etc/drbd.conf <<-EOF
+      global { usage-count no; }
+      common { syncer { rate 100M; } }
+      resource r0 {
+              protocol C;
+              startup {
+                      wfc-timeout  15;
+                      degr-wfc-timeout 60;
+              }
+              net {
+                      cram-hmac-alg sha1;
+                      shared-secret "$SECRET";
+                      max-buffers 8000;
+              }
+              disk {
+                      resync-rate 1G;
+              }
+              on node1 {
+                      device /dev/drbd0;
+                      disk $DEV;
+                      address $IP1:7788;
+                      meta-disk internal;
+              }
+              on node2 {
+                      device /dev/drbd0;
+                      disk $DEV;
+                      address $IP2:7788;
+                      meta-disk internal;
+              }
+      }
+      EOF
+
+      umount "$DEV" || true
+      sed -i "\|${DEV}|d" /etc/fstab
+
+      [ -e /home ] && rm -rf /home || true
+
+      wipefs -a "$DEV"
+
+      drbdadm --force create-md r0
+
+      systemctl start drbd
+  - name: Erstelle Benutzer "hammer"
+    user: root
+    check: |
+      id -u hammer
+    script: |
+      groupadd -g 955 hammer
+      useradd -u 955 -g 955 -rms /usr/sbin/nologin hammer
+
+      usermod --add-subuids "200000-265535" --add-subgids "200000-265535" hammer
+
+      loginctl enable-linger hammer
