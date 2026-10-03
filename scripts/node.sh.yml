@@ -1,5 +1,11 @@
 steps:
   - ref: base
+  - name: Starte Applikationsumgebung "hammer"
+    user: root
+    check: |
+      systemctl is-active user@955 && ! [ -L /etc/haproxy ]
+    script: |
+      systemctl start user@955
   - name: Aktiviere DRBD Primary
     user: root
     check: |
@@ -74,11 +80,9 @@ steps:
 
       listen mqtt
        	mode tcp
-       	option tcplog
+       	bind :1883
 
-       	bind 192.168.0.100:1883
-
-       	server s1 127.0.0.1:1883
+       	server s1 127.0.0.1:10883
 
       frontend http-80
        	bind :80
@@ -110,6 +114,8 @@ steps:
       systemctl --user daemon-reload
   - name: Konfiguriere Quadlet - Mosquitto MQTT Broker
     user: hammer
+    env:
+      - MOSQUITTO_VERSION
     script: |
       cat > ~/quadlet/mosquitto.container <<-EOF
       [Unit]
@@ -118,10 +124,10 @@ steps:
       [Container]
       ContainerName=mosquitto
       Network=hammer-net.network
-      Image=docker.io/library/eclipse-mosquitto:latest
+      Image=docker.io/library/eclipse-mosquitto:$MOSQUITTO_VERSION
       Volume=$HOME/mqtt/data:/mosquitto/data:U
       Volume=$HOME/mqtt/config:/mosquitto/config:U
-      PublishPort=127.0.0.1:1883:1883
+      PublishPort=127.0.0.1:10883:1883
 
       [Service]
       Restart=always
@@ -142,6 +148,8 @@ steps:
       EOF
   - name: Konfiguriere Quadlet - Home Assistant
     user: hammer
+    env:
+      - HOMEASSISTANT_VERSION
     script: |
       cat > ~/quadlet/homeassistant.container <<-EOF
       [Unit]
@@ -150,7 +158,7 @@ steps:
       [Container]
       ContainerName=homeassistant
       Network=hammer-net.network
-      Image=ghcr.io/home-assistant/home-assistant:stable
+      Image=ghcr.io/home-assistant/home-assistant:$HOMEASSISTANT_VERSION
       Volume=$HOME/ha:/config:U
       Volume=/etc/localtime:/etc/localtime:ro
       Volume=/run/dbus:/run/dbus:ro
@@ -168,17 +176,53 @@ steps:
   - name: Konfiguriere Applikation - Home Assistant
     user: hammer
     check: |
-      [ -e ~/ha/configuration.yaml ] && grep -q 'use_x_forwarded_for: true' ~/ha/configuration.yaml
+      [ -e ~/ha/.storage/http ]
     script: |
-      mkdir -p ~/ha
+      mkdir -p ~/ha/.storage
 
-      cat > ~/ha/configuration.yaml <<-EOF
-      default_config:
-
-      http:
-        use_x_forwarded_for: true
-        trusted_proxies:
-          - 10.89.0.0/24
+      cat > ~/ha/.storage/http <<-EOF
+      {
+        "version": 2,
+        "minor_version": 2,
+        "key": "http",
+        "data": {
+          "stable": {
+            "server_port": 8123,
+            "use_x_forwarded_for": true,
+            "trusted_proxies": [
+              "10.89.0.0/24"
+            ],
+            "cors_allowed_origins": [
+              "https://cast.home-assistant.io"
+            ],
+            "login_attempts_threshold": -1,
+            "ip_ban_enabled": true,
+            "ssl_profile": "modern",
+            "use_x_frame_options": true,
+            "created_at": "2026-10-03T17:23:51.435577+00:00",
+            "error": "not_promoted",
+            "error_message": null
+          },
+          "pending": {
+            "server_port": 8123,
+            "use_x_forwarded_for": true,
+            "trusted_proxies": [
+              "10.89.0.0/24"
+            ],
+            "cors_allowed_origins": [
+              "https://cast.home-assistant.io"
+            ],
+            "login_attempts_threshold": -1,
+            "ip_ban_enabled": true,
+            "ssl_profile": "modern",
+            "use_x_frame_options": true,
+            "created_at": "2026-10-03T17:23:51.435577+00:00",
+            "error": "not_promoted",
+            "error_message": null
+          },
+          "yaml_migration_done": true
+        }
+      }
       EOF
 
       systemctl --user daemon-reload
@@ -196,3 +240,59 @@ steps:
     script: |
       systemctl --user daemon-reload
       systemctl --user restart homeassistant
+  - ref: cluster
+  - name: Authentifiziere Cluster Nodes
+    user: root
+    env:
+      - IP1
+      - IP2
+      - $SECRET
+    script: |
+      pcs host auth node1 addr="$IP1" node2 addr="$IP2" -u hacluster -p "$SECRET"
+  - name: Erstelle Cluster "ham"
+    user: root
+    env:
+      - IP1
+      - IP2
+    check: |
+      [[ -z "$(pcs property config stonith-enabled | grep -o '(default)')" ]]
+    script: |
+      pcs cluster setup ham node1 addr="$IP1" node2 addr="$IP2" transport udpu --start --enable --force
+
+      # TODO: add optional proxmox stonith
+      pcs property set stonith-enabled=false
+  - name: Konfiguriere Cluster Ressourcen
+    user: root
+    env:
+      - VIP
+    check: |
+      pcs status query resource apps exists
+    script: |
+      pcs resource create vip ocf:heartbeat:IPaddr2 ip="$VIP" nic="ens19" op monitor interval=10s
+
+      pcs resource create drbd ocf:linbit:drbd drbd_resource="r0" op monitor interval="20s" role="Promoted" op monitor interval="40s" role="Unpromoted" \
+          promotable promoted-max=1 promoted-node-max=1 clone-max=2 clone-node-max=1 notify=true
+
+      pcs resource create data filesystem device="/dev/drbd0" directory="/home" fstype="ext4"
+
+      pcs resource create proxy systemd:haproxy op monitor interval=10s
+
+      pcs resource create apps systemd:user@955 op monitor interval=10s
+  - name: Konfiguriere Cluster Colocation
+    user: root
+    check: |
+      pcs constraint colocation | grep -q "resource 'apps' with"
+    script: |
+      pcs constraint colocation add Promoted drbd-clone with vip score=INFINITY
+      pcs constraint colocation add data with vip score=INFINITY
+      pcs constraint colocation add proxy with vip score=INFINITY
+      pcs constraint colocation add apps with vip score=INFINITY
+  - name: Konfiguriere Cluster Reihenfolge
+    user: root
+    check: |
+      pcs constraint order | grep -q "then start resource 'apps'"
+    script: |
+      pcs constraint order start vip then promote drbd-clone
+      pcs constraint order promote drbd-clone then start data
+      pcs constraint order start data then start proxy
+      pcs constraint order start data then start apps

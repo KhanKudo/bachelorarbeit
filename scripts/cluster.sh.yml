@@ -1,0 +1,15 @@
+steps:
+  - name: Installiere corosync & pacemaker & pcs
+    user: root
+    check: |
+      for pkg in corosync pacemaker pacemaker-cli-utils pcs; do dpkg -s "$pkg"; done
+    script: |
+      apt install --no-install-recommends corosync pacemaker pacemaker-cli-utils pcs
+  - name: Konfiguriere hacluster Benutzer
+    user: root
+    env:
+      - $SECRET
+    # check: |
+    #   for pkg in corosync pacemaker pacemaker-cli-utils pcs; do dpkg -s "$pkg"; done
+    script: |
+      printf '%s' "$SECRET" | passwd hacluster -s

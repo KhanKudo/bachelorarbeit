@@ -1,2 +1,10 @@
 steps:
   - ref: base
+  - name: Konfiguriere HAProxy
+    user: root
+    check: |
+      [ -L /etc/haproxy ]
+    script: |
+      rm -rf /etc/haproxy
+      ln -s /home/haproxy /etc/haproxy
+  - ref: cluster

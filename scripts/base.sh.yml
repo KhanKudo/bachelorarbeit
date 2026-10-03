@@ -34,17 +34,26 @@ steps:
       fi
     script: |
       host=""
+      peer=""
+      host_ip=""
+      peer_ip=""
       if ip addr | grep -qE "inet $IP1/"; then
           host="node1"
+          host_ip="$IP1"
+          peer="node2"
+          peer_ip="$IP2"
       elif ip addr | grep -qE "inet $IP2/"; then
           host="node2"
+          host_ip="$IP2"
+          peer="node1"
+          peer_ip="$IP1"
       else
           echo "Machine's IP neither matches IP1 nor IP2: $IP1 nor $IP2 "
           exit 99
       fi
 
       hostnamectl hostname "$host"
-      sed -Ei "s/127.0.1.1\s+.+/127.0.1.1\t$host/" /etc/hosts
+      sed -Ei "s/127.0.1.1\s+.+/127.0.1.1\t$host\n$peer_ip\t$peer/" /etc/hosts
   - name: Installiere Basispakete
     user: root
     check: |
@@ -62,20 +71,36 @@ steps:
     env:
       - IP1
       - IP2
+      - VIP
       - GATEWAY
       - DNS
     check: |
       [ -e /etc/systemd/network/ens18.network ] && dpkg -s systemd-resolved
     script: |
       IP="$([[ "$(hostnamectl hostname)" == 'node1' ]] && echo -n "$IP1" || echo -n "$IP2")"
-      CIDR="$(ip addr | grep -E "inet $IP/" | xargs | cut -d' ' -f2)"
+      MASK="$(ip addr | grep -E "inet $IP/" | xargs | cut -d' ' -f2 | cut -d/ -f2)"
 
       cat > /etc/systemd/network/ens18.network <<-EOF
       [Match]
       Name=ens18
 
       [Network]
-      Address=$CIDR
+      Address=$IP/$MASK
+      Gateway=$GATEWAY
+      DNS=$DNS
+      IPv6AcceptRA=no
+      LinkLocalAddressing=no
+      EOF
+
+      cat > /etc/systemd/network/ens19.network <<-EOF
+      [Match]
+      Name=ens19
+
+      [Link]
+      ActivationPolicy=down
+
+      [Network]
+      Address=$VIP/$MASK
       Gateway=$GATEWAY
       DNS=$DNS
       IPv6AcceptRA=no
@@ -94,6 +119,8 @@ steps:
 
       systemctl restart systemd-networkd
       systemctl enable --now systemd-networkd systemd-networkd-wait-online
+
+      [[ "$IP" == "$IP1" ]] && ip link set up ens19 || :
 
       apt-get update -y
       apt-get install -y systemd-resolved
@@ -175,7 +202,7 @@ steps:
     user: root
     env:
       - DEV
-      - SECRET
+      - $SECRET
       - IP1
       - IP2
     check: |
@@ -186,6 +213,9 @@ steps:
       common { syncer { rate 100M; } }
       resource r0 {
               protocol C;
+              device /dev/drbd0;
+              meta-disk internal;
+              disk $DEV;
               startup {
                       wfc-timeout  15;
                       degr-wfc-timeout 60;
@@ -199,22 +229,16 @@ steps:
                       resync-rate 1G;
               }
               on node1 {
-                      device /dev/drbd0;
-                      disk $DEV;
                       address $IP1:7788;
-                      meta-disk internal;
               }
               on node2 {
-                      device /dev/drbd0;
-                      disk $DEV;
                       address $IP2:7788;
-                      meta-disk internal;
               }
       }
       EOF
 
       umount "$DEV" || true
-      sed -i "\|${DEV}|d" /etc/fstab
+      sed -i "\|/home|d" /etc/fstab
 
       [ -e /home ] && rm -rf /home || true
 
@@ -232,5 +256,3 @@ steps:
       useradd -u 955 -g 955 -rms /usr/sbin/nologin hammer
 
       usermod --add-subuids "200000-265535" --add-subgids "200000-265535" hammer
-
-      loginctl enable-linger hammer
