@@ -135,6 +135,8 @@ steps:
       apt-get -y install podman
   - name: Erstelle Hilfsskript "user" in /root/.bashrc
     user: root
+    check: |
+      grep -qE '^user() {$' /root/.bashrc
     script: |
       cat >> /root/.bashrc <<-'EOF'
       user() {

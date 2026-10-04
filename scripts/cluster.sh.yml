@@ -13,3 +13,21 @@ steps:
     #   for pkg in corosync pacemaker pacemaker-cli-utils pcs; do dpkg -s "$pkg"; done
     script: |
       printf '%s' "$SECRET" | passwd hacluster -s
+  - name: Erstelle systemd-service für ens19
+    user: root
+    check: |
+      [ -e /etc/systemd/system/ens19.service ]
+    script: |
+      cat > /etc/systemd/system/ens19.service <<-EOF
+      [Unit]
+      Description=Control ens19 interface state
+      After=network.target
+
+      [Service]
+      Type=exec
+      ExecStartPre=/sbin/ip link set up ens19
+      ExecStart=/bin/bash -c 'while ip link show ens19 | grep -q "state UP"; do sleep 5 ; done'
+      ExecStop=/sbin/ip link set down ens19
+      EOF
+
+      systemctl daemon-reload

@@ -3,12 +3,13 @@ steps:
   - name: Starte Applikationsumgebung "hammer"
     user: root
     check: |
-      systemctl is-active user@955 && ! [ -L /etc/haproxy ]
+      [ -L /etc/haproxy ]
     script: |
       systemctl start user@955
   - name: Aktiviere DRBD Primary
     user: root
     check: |
+      ! systemctl is-active user@955
       mount | grep -qE "^/dev/drbd0 "
     script: |
       drbdadm -- --overwrite-data-of-peer primary all
@@ -19,7 +20,8 @@ steps:
   - name: Konfiguriere /home/hammer
     user: root
     check: |
-      [ -e /home/hammer/.config/containers ] && [ -e /home/hammer/quadlet ]  && [ -e /home/hammer/.bashrc ] && [[ "$(stat -c '%a %u:%g' /home/hammer)" == '700 955:955' ]]
+      ! systemctl is-active user@955
+      [ -e /home/hammer/.config/containers ] && [ -e /home/hammer/quadlet ] && [ -e /home/hammer/.bashrc ] && [[ "$(stat -c '%a %u:%g' /home/hammer)" == '700 955:955' ]]
     script: |
       mkdir -p /home/hammer/.config/containers
       mkdir -p /home/hammer/quadlet
@@ -36,7 +38,7 @@ steps:
   - name: Konfiguriere HAProxy
     user: root
     check: |
-      [ -e /etc/haproxy/haproxy.cfg ] && [ -L /etc/haproxy ]
+      [ -L /etc/haproxy ] && ! systemctl is-active user@955 || [ -e /etc/haproxy/haproxy.cfg ]
     script: |
       mkdir -p /etc/haproxy/ssl
 
@@ -99,6 +101,8 @@ steps:
       EOF
   - name: Starte HAProxy
     user: root
+    check: |
+      ! systemctl is-active user@955
     script: |
       systemctl is-active haproxy && systemctl reload haproxy || systemctl enable --now haproxy
   - name: Konfiguriere internes Podman Netzwerk
@@ -228,15 +232,11 @@ steps:
       systemctl --user daemon-reload
   - name: Starte Mosquitto
     user: hammer
-    # check: |
-    #   systemctl --user is-active mosquitto
     script: |
       systemctl --user daemon-reload
       systemctl --user restart mosquitto
   - name: Starte Home Assistant
     user: hammer
-    # check: |
-    #   systemctl --user is-active homeassistant
     script: |
       systemctl --user daemon-reload
       systemctl --user restart homeassistant
@@ -268,7 +268,7 @@ steps:
     check: |
       pcs status query resource apps exists
     script: |
-      pcs resource create vip ocf:heartbeat:IPaddr2 ip="$VIP" nic="ens19" op monitor interval=10s
+      pcs resource create vip systemd:ens19 op monitor interval=10s
 
       pcs resource create drbd ocf:linbit:drbd drbd_resource="r0" op monitor interval="20s" role="Promoted" op monitor interval="40s" role="Unpromoted" \
           promotable promoted-max=1 promoted-node-max=1 clone-max=2 clone-node-max=1 notify=true
@@ -296,3 +296,34 @@ steps:
       pcs constraint order promote drbd-clone then start data
       pcs constraint order start data then start proxy
       pcs constraint order start data then start apps
+  - name: Warte auf Cluster
+    user: root
+    script: |
+      while ! pcs status query resource apps is-state started ; do sleep 5 ; done
+  - name: Prüfe Cluster Failover
+    user: root
+    skip: Möchten Sie einen automatischen Prüfung des Cluster Failovers durchführen?
+    script: |
+      active="$(pcs status query resource vip get-nodes)"
+      passive=""
+      if [[ "$active" == "node1" ]]; then
+          passive="node2"
+      elif [[ "$active" == "node2" ]]; then
+          passive="node1"
+      else
+          echo "Ressource 'vip' is auf einem ungültigen node '$active'!"
+          exit 1
+      fi
+
+      pcs node standby $active
+      while ! pcs status query resource apps is-state started on-node $passive; do sleep 5 ; done
+
+      # schauen ob's immer noch läuft
+      sleep 10
+      pcs status query resource apps is-state started on-node $passive
+
+      pcs node unstandby $active
+
+      pcs node standby $passive
+      while ! pcs status query resource apps is-state started on-node $active; do sleep 5 ; done
+      pcs node unstandby $passive
