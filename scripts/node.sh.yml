@@ -9,14 +9,15 @@ steps:
   - name: Aktiviere DRBD Primary
     user: root
     check: |
-      ! systemctl is-active user@955
-      mount | grep -qE "^/dev/drbd0 "
+      ! systemctl is-active user@955 || mount | grep -qE "^/dev/drbd0 "
     script: |
       drbdadm -- --overwrite-data-of-peer primary all
       [ -e /home ] && rm -rf /home || true
       mkdir -p /home
       mkfs -t ext4 /dev/drbd0
       mount /dev/drbd0 /home
+
+      while ! drbdadm status | grep -qw 'disk:UpToDate' && ! drbdadm status | grep -qw 'peer-disk:UpToDate' ; do sleep 5 ; done
   - name: Konfiguriere /home/hammer
     user: root
     check: |
@@ -37,13 +38,45 @@ steps:
       chmod 700 /home/hammer
   - name: Konfiguriere HAProxy
     user: root
+    env:
+      - DOMAIN
+      - ACME_EMAIL
     check: |
-      [ -L /etc/haproxy ] && ! systemctl is-active user@955 || [ -e /etc/haproxy/haproxy.cfg ]
+      [ -L /etc/haproxy ]
     script: |
       mkdir -p /etc/haproxy/ssl
 
-      mv /etc/haproxy /home/haproxy
-      ln -s /home/haproxy /etc/haproxy
+      cat > /etc/haproxy/acme.sh <<-'EOF'
+      #!/bin/bash
+      STATUS="$(echo "acme status" | socat stdio unix:/run/haproxy/admin.sock)"
+
+      while IFS= read -r line; do
+          printf '%s' "$line" | grep -qw '-' || continue
+          DAYS="$(printf '%s' "$line" | grep -owE "[0-9]+d" | cut -dd -f1)"
+          CERT="$(printf '%s' "$line" | grep - | cut -f1)"
+
+          if [[ $DAYS -ge 30 ]]; then
+              echo "Certificate \"$CERT\" is still valid for $DAYS days."
+              continue
+          else
+              echo "acme renew $CERT" | socat stdio unix:/run/haproxy/admin.sock
+
+              echo "Renewing Certificate \"$CERT\" with $DAYS days remaining."
+              while [ "$(echo "acme status" | socat stdio unix:/run/haproxy/admin.sock | grep -w "$CERT" | grep -owE "[0-9]+d" | cut -dd -f1)" -le $DAYS ] ; do sleep 5; done
+
+              cert="$(printf '%s' "$CERT" | cut -d/ -f2)"
+
+              echo "dump ssl cert $CERT" | socat stdio unix:/run/haproxy/admin.sock > "/etc/haproxy/ssl/$cert"
+
+              echo "Renewed Certificate \"$cert\" successfully!"
+
+              # to avoid burst-renewal, wait for the next script iteration (ignore if initial)
+              [[ $DAYS -gt 0 ]] && [[ "$1" != "all" ]] && exit 0
+          fi
+      done <<< "$STATUS"
+
+      echo "All Certificates checked!"
+      EOF
 
       cat > /etc/haproxy/haproxy.cfg <<-EOF
       global
@@ -80,31 +113,57 @@ steps:
        	errorfile 503 /etc/haproxy/errors/503.http
        	errorfile 504 /etc/haproxy/errors/504.http
 
-      listen mqtt
-       	mode tcp
-       	bind :1883
+      acme letsencrypt
+        account-key /etc/haproxy/letsencrypt-account.key
+        challenge http-01
+        contact $ACME_EMAIL
+        curves secp256r1
+        directory https://acme-v02.api.letsencrypt.org/directory
+        keytype ECDSA
+        map virt@acme
 
-       	server s1 127.0.0.1:10883
+      crt-store certs
+        crt-base /etc/haproxy/ssl
+        key-base /etc/haproxy/ssl
+        load crt "$DOMAIN.pem" acme letsencrypt domains "$DOMAIN"
 
       frontend http-80
-       	bind :80
+        bind :80
+        http-request return status 200 content-type text/plain lf-string "%[path,field(-1,/)].%[path,field(-1,/),map(virt@acme)]\n" if { path_beg '/.well-known/acme-challenge/' }
+        http-request redirect scheme https
+
+      frontend https-443
+        bind :443 ssl
+
+        ssl-f-use crt "@certs/$DOMAIN.pem"
 
         option forwardfor
-        http-request set-header X-Forwarded-Proto http
+        http-request set-header X-Forwarded-Proto https
         http-request set-header X-Forwarded-Host %[req.hdr(Host)]
         http-request set-header X-Real-Ip %[src]
 
-       	default_backend homeassistant
+        default_backend homeassistant
 
       backend homeassistant
-       	server s1 127.0.0.1:8123
+        server s1 127.0.0.1:8123
+
+      listen mqtt
+        mode tcp
+        bind :8883 ssl
+
+        ssl-f-use crt "@certs/$DOMAIN.pem"
+
+        server s1 127.0.0.1:1883
       EOF
+
+      mv /etc/haproxy /home/haproxy
+      ln -s /home/haproxy /etc/haproxy
   - name: Starte HAProxy
     user: root
     check: |
       ! systemctl is-active user@955
     script: |
-      systemctl is-active haproxy && systemctl reload haproxy || systemctl enable --now haproxy
+      systemctl is-active haproxy && systemctl reload haproxy || systemctl start haproxy
   - name: Konfiguriere internes Podman Netzwerk
     user: hammer
     script: |
@@ -131,7 +190,7 @@ steps:
       Image=docker.io/library/eclipse-mosquitto:$MOSQUITTO_VERSION
       Volume=$HOME/mqtt/data:/mosquitto/data:U
       Volume=$HOME/mqtt/config:/mosquitto/config:U
-      PublishPort=127.0.0.1:10883:1883
+      PublishPort=127.0.0.1:1883:1883
 
       [Service]
       Restart=always
@@ -268,14 +327,16 @@ steps:
     check: |
       pcs status query resource apps exists
     script: |
-      pcs resource create vip systemd:ens19 op monitor interval=10s
-
       pcs resource create drbd ocf:linbit:drbd drbd_resource="r0" op monitor interval="20s" role="Promoted" op monitor interval="40s" role="Unpromoted" \
           promotable promoted-max=1 promoted-node-max=1 clone-max=2 clone-node-max=1 notify=true
+
+      pcs resource create vip systemd:ens19 op monitor interval=10s meta priority=10
 
       pcs resource create data filesystem device="/dev/drbd0" directory="/home" fstype="ext4"
 
       pcs resource create proxy systemd:haproxy op monitor interval=10s
+
+      pcs resource create acme systemd:acme.timer op monitor interval=10s
 
       pcs resource create apps systemd:user@955 op monitor interval=10s
   - name: Konfiguriere Cluster Colocation
@@ -283,26 +344,53 @@ steps:
     check: |
       pcs constraint colocation | grep -q "resource 'apps' with"
     script: |
-      pcs constraint colocation add Promoted drbd-clone with vip score=INFINITY
-      pcs constraint colocation add data with vip score=INFINITY
-      pcs constraint colocation add proxy with vip score=INFINITY
-      pcs constraint colocation add apps with vip score=INFINITY
+      pcs constraint colocation add vip with Promoted drbd-clone score=INFINITY
+      pcs constraint colocation add data with Promoted drbd-clone score=INFINITY
+      pcs constraint colocation add proxy with data score=INFINITY
+      pcs constraint colocation add acme with proxy score=INFINITY
+      pcs constraint colocation add apps with data score=INFINITY
   - name: Konfiguriere Cluster Reihenfolge
     user: root
     check: |
       pcs constraint order | grep -q "then start resource 'apps'"
     script: |
-      pcs constraint order start vip then promote drbd-clone
+      pcs constraint order promote drbd-clone then start vip
       pcs constraint order promote drbd-clone then start data
       pcs constraint order start data then start proxy
+      pcs constraint order start proxy then start acme
       pcs constraint order start data then start apps
+  - name: Konfiguriere Proxmox STONITH
+    user: root
+    # skip: Möchten Sie den Cluster für STONITH über Proxmox konfigurieren?
+    env:
+      - PVE_IP
+      - PVE_NODE
+      - PVE_ID1
+      - PVE_ID2
+      - PVE_USER
+      - $PVE_PASS
+    check: |
+      [[ -z "$(pcs property config priority-fencing-delay | grep -o '(default)')" ]]
+    script: |
+      pcs stonith create fence-node1 fence_pve ip=$PVE_IP ssl_insecure=1 pve_node=$PVE_NODE vmtype=qemu username=$PVE_USER password=$PVE_PASS pcmk_host_list=node1 plug=$PVE_ID1
+
+      pcs stonith create fence-node2 fence_pve ip=$PVE_IP ssl_insecure=1 pve_node=$PVE_NODE vmtype=qemu username=$PVE_USER password=$PVE_PASS pcmk_host_list=node2 plug=$PVE_ID2
+
+      pcs constraint location fence-node1 avoids node1=INFINITY
+      pcs constraint location fence-node2 avoids node2=INFINITY
+
+      pcs property set stonith-enabled=true
+      pcs property set stonith-timeout=60s
+      pcs property set stonith-action=reboot
+      pcs property set no-quorum-policy=ignore
+      pcs property set priority-fencing-delay=2s
   - name: Warte auf Cluster
     user: root
     script: |
       while ! pcs status query resource apps is-state started ; do sleep 5 ; done
-  - name: Prüfe Cluster Failover
+  - name: Prüfe Cluster Aktiv-Passiv Tausch
     user: root
-    skip: Möchten Sie einen automatischen Prüfung des Cluster Failovers durchführen?
+    skip: Möchten Sie eine automatische Prüfung des Wechselvorgangs vom/zum passiven Node durchführen?
     script: |
       active="$(pcs status query resource vip get-nodes)"
       passive=""
@@ -317,13 +405,37 @@ steps:
 
       pcs node standby $active
       while ! pcs status query resource apps is-state started on-node $passive; do sleep 5 ; done
+      pcs node unstandby $active
 
       # schauen ob's immer noch läuft
       sleep 10
       pcs status query resource apps is-state started on-node $passive
 
-      pcs node unstandby $active
-
+      sleep 10
       pcs node standby $passive
       while ! pcs status query resource apps is-state started on-node $active; do sleep 5 ; done
       pcs node unstandby $passive
+  - name: Prüfe Cluster Fencing Passive
+    user: root
+    skip: Möchten Sie eine automatische Prüfung des STONITH Fencing Agents am passiven Node durchführen?
+    script: |
+      active="$(pcs status query resource vip get-nodes)"
+      passive=""
+      if [[ "$active" == "node1" ]]; then
+          passive="node2"
+      elif [[ "$active" == "node2" ]]; then
+          passive="node1"
+      else
+          echo "Ressource 'vip' is auf einem ungültigen node '$active'!"
+          exit 1
+      fi
+
+      pcs stonith fence $passive
+      while pcs cluster status | grep -qw "$passive: Offline"; do sleep 1 ; done
+      while ! pcs status query resource fence-$active is-state started on-node $passive; do sleep 5 ; done
+  - name: Prüfe Cluster STONITH Failover
+    user: root
+    skip: Möchten Sie einen Netzwerkverlust simulieren, um STONITH zu testen? (diese VM wird neugestartet)
+    script: |
+      nft add table inet isolate
+      nft add chain inet isolate input '{ type filter hook input priority 0; policy drop; }'

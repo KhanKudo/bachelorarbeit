@@ -75,7 +75,7 @@ steps:
       - GATEWAY
       - DNS
     check: |
-      [ -e /etc/systemd/network/ens18.network ] && dpkg -s systemd-resolved
+      [ -e /etc/systemd/network/ens18.network ] && [ -e /etc/systemd/network/ens19.network ] && dpkg -s systemd-resolved
     script: |
       IP="$([[ "$(hostnamectl hostname)" == 'node1' ]] && echo -n "$IP1" || echo -n "$IP2")"
       MASK="$(ip addr | grep -E "inet $IP/" | xargs | cut -d' ' -f2 | cut -d/ -f2)"
@@ -101,7 +101,6 @@ steps:
 
       [Network]
       Address=$VIP/$MASK
-      Gateway=$GATEWAY
       DNS=$DNS
       IPv6AcceptRA=no
       LinkLocalAddressing=no
@@ -136,7 +135,7 @@ steps:
   - name: Erstelle Hilfsskript "user" in /root/.bashrc
     user: root
     check: |
-      grep -qE '^user() {$' /root/.bashrc
+      grep -q '^user() {$' /root/.bashrc
     script: |
       cat >> /root/.bashrc <<-'EOF'
       user() {
@@ -200,6 +199,28 @@ steps:
       chmod o-rwx -R /etc/haproxy
 
       systemctl disable --now haproxy
+  - name: Erstelle HAProxy ACME systemd-units
+    user: root
+    check: |
+      [ -e /etc/systemd/system/acme.service ] && [ -e /etc/systemd/system/acme.timer ]
+    script: |
+      cat > /etc/systemd/system/acme.service <<-EOF
+      [Unit]
+      Description=Renew expiring HAProxy certificates
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash /etc/haproxy/acme.sh
+      EOF
+
+      cat > /etc/systemd/system/acme.timer <<-EOF
+      [Unit]
+      Description=Timer for renewing HAProxy certificates
+
+      [Timer]
+      OnActiveSec=15s
+      OnUnitActiveSec=1h
+      EOF
   - name: Konfiguriere DRBD Partition
     user: root
     env:
@@ -226,6 +247,9 @@ steps:
                       cram-hmac-alg sha1;
                       shared-secret "$SECRET";
                       max-buffers 8000;
+                      after-sb-0pri discard-zero-changes;
+                      after-sb-1pri discard-secondary;
+                      after-sb-2pri disconnect;
               }
               disk {
                       resync-rate 1G;

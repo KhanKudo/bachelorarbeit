@@ -2,9 +2,9 @@ steps:
   - name: Installiere corosync & pacemaker & pcs
     user: root
     check: |
-      for pkg in corosync pacemaker pacemaker-cli-utils pcs; do dpkg -s "$pkg"; done
+      for pkg in corosync pacemaker pacemaker-cli-utils fence-agents-pve pcs; do dpkg -s "$pkg"; done
     script: |
-      apt install --no-install-recommends corosync pacemaker pacemaker-cli-utils pcs
+      apt install --no-install-recommends corosync pacemaker pacemaker-cli-utils fence-agents-pve pcs
   - name: Konfiguriere hacluster Benutzer
     user: root
     env:
