@@ -1,3 +1,4 @@
 .directory
+.env
 scripts/node.sh
 scripts/peer.sh
