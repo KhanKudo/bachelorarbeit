@@ -200,14 +200,44 @@ steps:
       EOF
 
       systemctl --user daemon-reload
-  - name: Konfiguriere Applikation - Mosquitto MQTT Broker
+  - name: Konfiguriere Applikation - Mosquitto MQTT Broker # TODO: acl & limit permissions for homeassistant/#
     user: hammer
+    env:
+      - $MQTT_HOME_PASS
+      - $MQTT_DEVS_PASS
+    check: |
+      [ -e ~/mqtt/config/mosquitto.conf ] && [ -e ~/mqtt/config/acl.conf ] && [ -e ~/mqtt/config/pwds.conf ] && grep -q 'home:' ~/mqtt/config/pwds.conf && grep -q 'devs:' ~/mqtt/config/pwds.conf
     script: |
       mkdir -p ~/mqtt/{config,data}
 
+      # allow_anonymous is only for educational/demonstrational purposes
       cat > ~/mqtt/config/mosquitto.conf <<-EOF
       listener 1883
       allow_anonymous true
+      persistence true
+      persistence_location /mosquitto/data
+      autosave_interval 300
+      EOF
+
+      # anonymous read is only for educational/demonstrational purposes
+      cat > ~/mqtt/config/acl.conf <<-EOF
+      topic read #
+
+      user home
+      topic write homeassistant/status
+      topic read homeassistant/+/+/config
+      topic write homeassistant/+/+/command
+      topic read homeassistant/+/+/state
+      topic read home/+/availability
+
+      user devs
+      topic read dev/+/s
+      topic write dev/+/c
+      topic read homeassistant/status
+      topic write homeassistant/+/+/config
+      topic readwrite homeassistant/+/+/command
+      topic readwrite homeassistant/+/+/state
+      topic write home/+/availability
       EOF
   - name: Konfiguriere Quadlet - Home Assistant
     user: hammer
@@ -238,10 +268,204 @@ steps:
       systemctl --user daemon-reload
   - name: Konfiguriere Applikation - Home Assistant
     user: hammer
+    env:
+      - PVE_IP
+      - PVE_ID1
+      - PVE_ID2
+      - $PVE_TOKEN
     check: |
       [ -e ~/ha/.storage/http ]
     script: |
       mkdir -p ~/ha/.storage
+
+      cat > ~/ha/configuration.yaml <<-EOF
+      # Loads default set of integrations. Do not remove.
+      default_config:
+
+      # Load frontend themes from the themes folder
+      frontend:
+        themes: !include_dir_merge_named themes
+
+      automation: !include automations.yaml
+      script: !include scripts.yaml
+      scene: !include scenes.yaml
+
+      sensor:
+        - platform: rest
+          resource: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$VM_ID1/status/current"
+          method: GET
+          verify_ssl: false
+          name: Node1 Status
+          unique_id: pve_node1_status
+          headers:
+            Authorization: !secret pvetoken
+          value_template: '{{ value_json.data.status }}'
+          scan_interval: 5
+          json_attributes_path: '$.data'
+          json_attributes:
+            - cpu
+            - mem
+            - uptime
+            - diskread
+            - diskwrite
+            - netin
+            - netout
+
+        - platform: rest
+          resource: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$VM_ID2/status/current"
+          method: GET
+          verify_ssl: false
+          name: Node2 Status
+          unique_id: pve_node2_status
+          headers:
+            Authorization: !secret pvetoken
+          value_template: '{{ value_json.data.status }}'
+          scan_interval: 5
+          json_attributes_path: '$.data'
+          json_attributes:
+            - cpu
+            - mem
+            - uptime
+            - diskread
+            - diskwrite
+            - netin
+            - netout
+
+      template:
+        - sensor:
+            - name: "Node1 CPU"
+              unique_id: pve_node1_cpu
+              unit_of_measurement: "%"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node1_status', 'cpu') %}
+                {{ (v * 100) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node1 Memory"
+              unique_id: pve_node1_memory
+              unit_of_measurement: "GB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node1_status', 'mem') %}
+                {{ (v / 1073741824) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node1 Disk Read"
+              unique_id: pve_node1_disk_read
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node1_status', 'diskread') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node1 Disk Write"
+              unique_id: pve_node1_disk_write
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node1_status', 'diskwrite') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node1 Net In"
+              unique_id: pve_node1_net_in
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node1_status', 'netin') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node1 Net Out"
+              unique_id: pve_node1_net_out
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node1_status', 'netout') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node1 Uptime"
+              unique_id: pve_node1_uptime
+              unit_of_measurement: "h"
+              state_class: measurement
+              icon: mdi:timer-outline
+              state: >
+                {% set s = state_attr('sensor.node1_status', 'uptime') %}
+                {{ (s / 3600) | round(2) if s is not none and s > 0 else 0 }}
+
+            - name: "Node2 CPU"
+              unique_id: pve_node2_cpu
+              unit_of_measurement: "%"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node2_status', 'cpu') %}
+                {{ (v * 100) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node2 Memory"
+              unique_id: pve_node2_memory
+              unit_of_measurement: "GB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node2_status', 'mem') %}
+                {{ (v / 1073741824) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node2 Disk Read"
+              unique_id: pve_node2_disk_read
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node2_status', 'diskread') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node2 Disk Write"
+              unique_id: pve_node2_disk_write
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node2_status', 'diskwrite') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node2 Net In"
+              unique_id: pve_node2_net_in
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node2_status', 'netin') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node2 Net Out"
+              unique_id: pve_node2_net_out
+              unit_of_measurement: "MB"
+              state_class: measurement
+              state: >
+                {% set v = state_attr('sensor.node2_status', 'netout') %}
+                {{ (v / 1048576) | round(2) if v is not none else 'N/A' }}
+
+            - name: "Node2 Uptime"
+              unique_id: pve_node2_uptime
+              unit_of_measurement: "h"
+              state_class: measurement
+              icon: mdi:timer-outline
+              state: >
+                {% set s = state_attr('sensor.node2_status', 'uptime') %}
+                {{ (s / 3600) | round(2) if s is not none and s > 0 else 0 }}
+
+      rest_command:
+        reboot_node1:
+          url: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$PVE_ID1/status/reboot"
+          method: post
+          verify_ssl: false
+          headers:
+            Authorization: !secret pvetoken
+        reboot_node2:
+          url: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$PVE_ID2/status/reboot"
+          method: post
+          verify_ssl: false
+          headers:
+            Authorization: !secret pvetoken
+      EOF
+
+      cat > ~/ha/secrets.yaml <<-EOF
+      # Learn more at https://www.home-assistant.io/docs/configuration/secrets/
+      pvetoken: PVEAPIToken=$PVE_TOKEN
+      EOF
 
       cat > ~/ha/.storage/http <<-EOF
       {
@@ -293,6 +517,20 @@ steps:
     user: hammer
     script: |
       systemctl --user daemon-reload
+      systemctl --user restart mosquitto
+  - name: Konfiguriere MQTT Benutzer
+    user: hammer
+    check: |
+      [ -e ~/mqtt/config/pwds.conf ]
+    script: |
+      cat >> ~/mqtt/config/mosquitto.conf <<-EOF
+      password_file /mosquitto/config/pwds.conf
+      acl_file /mosquitto/config/acl.conf
+      EOF
+
+      podman exec mosquitto mosquitto_passwd -cb /mosquitto/config/pwds.conf home "$MQTT_HOME_PASS"
+      podman exec mosquitto mosquitto_passwd -b /mosquitto/config/pwds.conf devs "$MQTT_DEVS_PASS"
+
       systemctl --user restart mosquitto
   - name: Starte Home Assistant
     user: hammer

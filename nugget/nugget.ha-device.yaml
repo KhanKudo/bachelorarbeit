@@ -1,9 +1,11 @@
 name: Nugget
+# name: Tuggit
 manufacturer: Seeed Studio
 model: esp32c6
 suggested_area: Bedroom
 sw_version: 0.1.0
 identifiers: 1c0b6b12-9592-4e84-baf0-8e1cfe8624f6
+# identifiers: 1c0b6b12-9592-4e84-baf0-8e1cfe8624f5
 time: false
 ota_update: true
 features:
@@ -13,3 +15,11 @@ features:
     resolution: 8
     pin: ^15
     initial_brightness: 40
+  - class: sensor
+    name: Temperature
+    unit_of_measurement: '°C'
+    var_name: temp
+  - class: sensor
+    name: Humidity
+    unit_of_measurement: '%'
+    var_name: hum

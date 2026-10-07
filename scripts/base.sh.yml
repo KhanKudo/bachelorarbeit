@@ -60,6 +60,74 @@ steps:
       for pkg in sudo vim tree tcpdump conntrack traceroute nftables curl wget openssl ca-certificates gnupg qemu-guest-agent; do dpkg -s "$pkg"; done
     script: |
       apt-get install -y sudo vim tree tcpdump conntrack traceroute nftables curl wget openssl ca-certificates gnupg qemu-guest-agent
+  - name: Konfiguriere nftables
+    user: root
+    env:
+      - GATEWAY
+      - LAN
+      - PVE_IP
+      - IP1
+      - IP2
+    check: |
+      grep -qw 'policy' /etc/nftables.conf
+    script: |
+      peer_ip="$([[ "$(hostnamectl hostname)" == 'node1' ]] && echo -n "$IP2" || echo -n "$IP1")"
+
+      cat >> /etc/nftables.conf <<-EOF
+      #!/usr/sbin/nft -f
+
+      flush ruleset
+
+      table inet filter {
+       	chain input {
+        		type filter hook input priority filter; policy drop;
+
+        		ct state established,related accept
+
+        		ct state invalid drop
+
+        		iifname "lo" accept
+
+        		ip protocol icmp accept
+
+        		# SSH
+      		  iifname "ens18" tcp dport 22 accept
+
+        		# Peer Node
+      		  iifname "ens18" ip saddr $peer_ip/32 accept
+
+        		# Home Assistant & Mosquitto
+        		iifname "ens19" tcp dport { 80, 443, 8883 } accept
+       	}
+       	chain forward {
+        		type filter hook forward priority filter; policy drop;
+       	}
+       	chain output {
+        		type filter hook output priority filter; policy accept;
+
+        		ct state established,related accept
+
+        		ct state invalid drop
+
+        		# DNS
+        		ip daddr $GATEWAY/32 udp dport 53 accept
+        		ip daddr $GATEWAY/32 tcp dport 53 accept
+
+        		# NTP
+        		ip daddr $GATEWAY/32 udp dport 123 accept
+
+        		# Peer Node
+        		ip daddr $peer_ip/32 tcp dport 22 drop
+        		ip daddr $peer_ip/32 accept
+
+        		# Proxmox
+        		ip daddr $PVE_IP/32 tcp dport 8006 accept
+
+        		# Prohibit LAN
+        		ip daddr $LAN drop
+       	}
+      }
+      EOF
   - name: Installiere DRBD
     user: root
     check: |
