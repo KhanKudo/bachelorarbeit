@@ -72,8 +72,38 @@ private:
     std::function<void(void)> func;
   };
 
-  struct Automation {
+  enum CondSrcType { RAW, INT, LEN };
+
+  // TODO: just put state directly into here and provide the source's id inside
+  // cond a
+  // TODO: might then also make sense to make source ids independent of action
+  // (automation) ids
+  struct CondSource {
+    uint16_t id;
     uint32_t state;
+    CondSrcType type;
+    String topic;
+  };
+
+  // Gates reference other conditions a(u16) b(u16) - note u16=id-ref,u32=static
+  // Comparators compare a source with either a static value or another source
+  //   if a>>16 == 0 then static compare a(u16) == b(u32)
+  //   if a>>16 != 0 then source compare a(u16 & 0xffff) == a(u16 >> 16) b(x)
+  // enum CondType { AND, OR, XOR, NAND, NOR, XNOR, EQ, GT, GE, LT, LE, MOD,
+  // NMOD, BITAND, BITOR, BITXOR };
+  enum CondType { AND, OR, XOR, NAND, NOR, XNOR, EQ = 128, NQ, GT, GE, LT, LE };
+
+  struct Condition {
+    uint16_t id;
+    CondType type;
+    uint32_t a;
+    uint32_t b;
+  };
+
+  struct Automation {
+    uint16_t id;
+    uint16_t condId;
+    uint16_t triggerSrc;
     String topic;
     String data;
   };
@@ -96,7 +126,9 @@ private:
   std::vector<std::function<void(void)>> loopers;
 
   StaticJsonDocument<256> jsonMsg;
-  std::map<String, _HA_DEVICE::Automation> automations;
+  std::vector<_HA_DEVICE::CondSource> sources;
+  std::vector<_HA_DEVICE::Condition> conditions;
+  std::vector<_HA_DEVICE::Automation> automations;
   String automationTopic = "home/tester/automations";
 
   WiFiClient wifiClient;
@@ -139,8 +171,7 @@ private:
   std::function<void(char *, byte *, unsigned int)> callback =
       [this](char *char_topic, byte *payload, unsigned int length) {
         String topic = char_topic;
-
-        Serial.println(String("Received: ") + topic);
+        Serial.println(topic);
 
 #ifdef OTA_UPDATE
         if (topic == otaServer) {
@@ -231,34 +262,95 @@ private:
         }
 #endif
 
-        if (topic == automationTopic + "/clear") {
-          automations.clear();
-          Serial.println("Cleared all automations!");
-          return;
-        }
-
         String message = String((char *)payload, length);
 
-        // for (int i = 0; i < length; i++) {
-        //   message += (char)payload[i];
-        // }
+        if (topic.startsWith(automationTopic + '/')) {
+          if (topic == automationTopic + "/clear") {
+            sources.clear();
+            conditions.clear();
+            automations.clear();
+            Serial.println("Cleared all actions, conditions and sources!");
+          } else if (length == 0) {
+            return;
+          } else if (topic.startsWith(automationTopic + "/add/source/")) {
+            deserializeJson(jsonMsg, message);
+            sources.push_back({(uint16_t)jsonMsg["id"],
+                               (uint32_t)jsonMsg["state"], jsonMsg["type"],
+                               jsonMsg["topic"]});
+            Serial.println(String("Added Source || id: ") +
+                           String(jsonMsg["id"]) + String(" | state: ") +
+                           String(jsonMsg["state"]) + String(" | type: ") +
+                           String(jsonMsg["type"]) + String(" | topic: ") +
+                           String(jsonMsg["topic"]));
+            client.subscribe(String(jsonMsg["topic"]).c_str());
+          } else if (topic.startsWith(automationTopic + "/add/condition/")) {
+            deserializeJson(jsonMsg, message);
+            conditions.push_back({(uint16_t)jsonMsg["id"], jsonMsg["type"],
+                                  (uint32_t)jsonMsg["a"],
+                                  (uint32_t)jsonMsg["b"]});
+            Serial.println(String("Added Condition || id: ") +
+                           String(jsonMsg["id"]) + String(" | type: ") +
+                           String(jsonMsg["type"]) + String(" | a: ") +
+                           String(jsonMsg["a"]) + String(" | b: ") +
+                           String(jsonMsg["b"]));
+          } else if (topic.startsWith(automationTopic + "/add/action/")) {
+            deserializeJson(jsonMsg, message);
+            automations.push_back({(uint16_t)jsonMsg["id"],
+                                   (uint16_t)jsonMsg["condId"],
+                                   (uint16_t)jsonMsg["triggerSrc"],
+                                   jsonMsg["topic"], jsonMsg["data"]});
+            Serial.println(
+                String("Added Action || id: ") + String(jsonMsg["id"]) +
+                String(" | condId: ") + String(jsonMsg["condId"]) +
+                String(" | triggerSrc: ") + String(jsonMsg["triggerSrc"]) +
+                String(" | topic: ") + String(jsonMsg["topic"]) +
+                String(" | data: ") + String(jsonMsg["data"]));
+          } else if (topic == automationTopic + "/remove") {
+            // TODO
 
-        if (topic == automationTopic + "/set") {
-          deserializeJson(jsonMsg, message);
-          automations.insert(std::pair<String, Automation>(
-              String(jsonMsg["id"]),
-              {(uint32_t)jsonMsg["state"], jsonMsg["topic"], jsonMsg["data"]}));
-          Serial.println(String("Set Automation: ") + String(jsonMsg["id"]) +
-                         String(" | topic: ") + String(jsonMsg["topic"]) +
-                         String(" | data: ") + String(jsonMsg["data"]));
-          return;
-        } else if (topic == automationTopic + "/delete") {
-          automations.erase(message);
-          Serial.println(String("Removed Automation: ") + message);
+            // automations.erase(std::remove_if(automations.begin(),
+            //                                  automations.end(),
+            //                                  [&message](auto &item) {
+            //                                    return item.id == message;
+            //                                  }),
+            //                   automations.end());
+            Serial.println(String("Removed Action for condId and all related "
+                                  "conditions & sources: ") +
+                           message);
+          }
           return;
         }
 
-        listeners.at(topic)(message);
+        auto it = listeners.find(topic);
+        if (it != listeners.end()) {
+          it->second(message); // call listener
+        } else { // look if subscription came from an automation's source
+          for (auto it = sources.begin(); it != sources.end(); ++it) {
+            yield();
+            if (topic == it->topic) {
+              Serial.println(String("Received Source Update || id: ") +
+                             String(it->id) + String(" | topic: ") + topic +
+                             String(" | message: ") + message);
+              if (it->type == RAW) {
+                it->state = 0;
+                memcpy(&it->state, payload, length < 4 ? length : 4);
+              } else if (it->type == INT) {
+                it->state = length ? message.toInt() : 0;
+              } else if (it->type == LEN) {
+                it->state = (uint32_t)length;
+              }
+
+              for (auto ait = automations.begin(); ait != automations.end();
+                   ++ait) {
+                yield();
+                if (ait->triggerSrc == it->id) {
+                  checkAutomation(ait->id);
+                  continue;
+                }
+              }
+            }
+          }
+        }
       };
 
   void reconnect() {
@@ -273,18 +365,19 @@ private:
   }
 
   void connected() {
-    Serial.println("MQTT connected!");
     client.subscribe("homeassistant/status");
 #ifdef OTA_UPDATE
     client.subscribe(otaServer.c_str());
 #endif
-
-    Serial.println(automationTopic + "/clear");
-    Serial.println(automationTopic + "/set");
-    Serial.println(automationTopic + "/delete");
     client.subscribe((automationTopic + "/clear").c_str());
-    client.subscribe((automationTopic + "/set").c_str());
-    client.subscribe((automationTopic + "/delete").c_str());
+    client.subscribe((automationTopic + "/add/source/#").c_str());
+    client.subscribe((automationTopic + "/add/condition/#").c_str());
+    client.subscribe((automationTopic + "/add/action/#").c_str());
+    client.subscribe((automationTopic + "/remove").c_str());
+
+    for (auto it = sources.begin(); it != sources.end(); it++) {
+      client.subscribe(it->topic.c_str());
+    }
 
     for (auto it = listeners.cbegin(); it != listeners.cend(); it++) {
       client.subscribe(it->first.c_str());
@@ -378,14 +471,10 @@ public:
 
     reconnect();
 
-    publish(
-        "homeassistant/number/alpha/config",
-        R"=-=-=({"has_entity_name":true,"~":"homeassistant/number/alpha","name":"Alpha","unique_id":"alpha","retain":true,"device":{"manufacturer":"Seeed Studio","model":"esp32c6","name":"Tester","suggested_area":"Bedroom","sw_version":"0.1.0","identifiers":"aaab6b12-9592-4e84-baf0-8e1cfe8624f7"},"availability_topic":"home/tester/availability","command_topic":"~/command","state_topic":"~/state","min":0,"max":255,"step":1})=-=-=",
-        true);
-    publish(
-        "homeassistant/switch/beta/config",
-        R"=-=-=({"has_entity_name":true,"~":"homeassistant/switch/beta","name":"Beta","unique_id":"beta","retain":true,"device":{"manufacturer":"Seeed Studio","model":"esp32c6","name":"Tester","suggested_area":"Bedroom","sw_version":"0.1.0","identifiers":"aaab6b12-9592-4e84-baf0-8e1cfe8624f7"},"availability_topic":"home/tester/availability","command_topic":"~/command","state_topic":"~/state"})=-=-=",
-        true);
+    publish("homeassistant/number/alpha/config", R"=-=-=({"has_entity_name":true,"~":"homeassistant/number/alpha","name":"Alpha","unique_id":"alpha","retain":true,"device":{"manufacturer":"Seeed Studio","model":"esp32c6","name":"Tester","suggested_area":"Bedroom","sw_version":"0.1.0","identifiers":"aaab6b12-9592-4e84-baf0-8e1cfe8624f7"},"availability_topic":"home/tester/availability","command_topic":"~/command","state_topic":"~/state","min":0,"max":255,"step":1})=-=-=", true);
+		publish("homeassistant/switch/beta/config", R"=-=-=({"has_entity_name":true,"~":"homeassistant/switch/beta","name":"Beta","unique_id":"beta","retain":true,"device":{"manufacturer":"Seeed Studio","model":"esp32c6","name":"Tester","suggested_area":"Bedroom","sw_version":"0.1.0","identifiers":"aaab6b12-9592-4e84-baf0-8e1cfe8624f7"},"availability_topic":"home/tester/availability","command_topic":"~/command","state_topic":"~/state"})=-=-=", true);
+		publish("homeassistant/button/restart/config", R"=-=-=({"has_entity_name":true,"~":"homeassistant/button/restart","name":"Restart","unique_id":"restart","retain":false,"device":{"manufacturer":"Seeed Studio","model":"esp32c6","name":"Tester","suggested_area":"Bedroom","sw_version":"0.1.0","identifiers":"aaab6b12-9592-4e84-baf0-8e1cfe8624f7"},"availability_topic":"home/tester/availability","command_topic":"~/command"})=-=-=", true);
+
 
 #ifdef OTA_UPDATE
     client.publish(
@@ -524,24 +613,138 @@ public:
     loopers.push_back(callback);
   }
 
-  void checkAutomation(String id, uint32_t state) {
-    if (automations.size() == 0)
-      return;
+  bool evalCondition(CondType type, uint32_t a, uint32_t b) {
+    switch (type) {
+    case AND:
+      return (a && b);
+    case OR:
+      return (a || b);
+    case NAND:
+      return !(a && b);
+    case NOR:
+      return !(a || b);
+    case XNOR:
+    case EQ:
+      return (a == b);
+    case XOR:
+    case NQ:
+      return (a != b);
+    case GT:
+      return (a > b);
+    case GE:
+      return (a >= b);
+    case LT:
+      return (a < b);
+    case LE:
+      return (a <= b);
+    default:
+      return false;
+    }
+    return false;
+  }
 
-    for (auto it = automations.cbegin(); it != automations.cend(); ++it) {
+  bool checkCondition(uint16_t id) {
+    for (auto it = conditions.begin(); it != conditions.end(); ++it) {
       yield();
-      if (id == it->first) {
-        Serial.println(String("Found matching Automation: ") + id);
-        if (state == it->second.state) {
-          Serial.println("  Triggered!");
-          client.publish(it->second.topic.c_str(), it->second.data.c_str(),
-                         false);
-        } else {
-          Serial.println("  State not matched!");
+      if (id == it->id) {
+        Serial.println(String("Found Condition: ") + id);
+        if (it->type & 0x80) { // comparison
+          Serial.println("  Type: Comparison");
+          if (it->a >> 16) { // source against source
+            Serial.println("  Kind: Source vs Source");
+            uint16_t ida = it->a & 0xffff;
+            uint16_t idb = it->a >> 16;
+            uint8_t found = 0;
+            uint32_t state = 0;
+            for (auto sit = sources.begin(); sit != sources.end(); ++sit) {
+              yield();
+              if (found) {
+                if (found == 1) { // found a, need b
+                  if (sit->id == idb) {
+                    return evalCondition(it->type, state, sit->state);
+                  }
+                } else { // found b, need a
+                  if (sit->id == ida) {
+                    return evalCondition(it->type, sit->state, state);
+                  }
+                }
+              } else {
+                if (sit->id == ida) {
+                  found = 1;
+                  state = sit->state;
+                } else if (sit->id == idb) {
+                  found = 2;
+                  state = sit->state;
+                }
+              }
+            }
+            Serial.println("  Failed to find both sources!");
+            return false;
+          } else { // source against static
+            Serial.println("  Kind: Source vs Static");
+            for (auto sit = sources.begin(); sit != sources.end(); ++sit) {
+              yield();
+              if ((uint16_t)it->a == sit->id) {
+                return evalCondition(it->type, sit->state, it->b);
+              }
+            }
+            Serial.println("  Failed to find source!");
+            return false;
+          }
+        } else { // gate
+          Serial.println("  Type: Gate");
+          return evalCondition(it->type, (uint32_t)checkCondition(it->a),
+                               (uint32_t)checkCondition(it->b));
         }
+        return false;
       }
     }
+    return false;
   }
+
+  void checkAutomation(uint16_t id) {
+    if (conditions.size() == 0 || automations.size() == 0)
+      return;
+
+    Serial.println(String("Checking Automation: ") + id);
+
+    for (auto it = automations.begin(); it != automations.end(); ++it) {
+      yield();
+      if (id == it->id) {
+        if (checkCondition(it->condId)) {
+          Serial.println(String("  Triggered Automation || topic: ") +
+                         it->topic + String(" | data: ") + it->data);
+          client.publish(it->topic.c_str(), it->data.c_str(), false);
+        } else {
+          Serial.println("  Condition for Automation was not satisfied!");
+        }
+        return;
+      }
+    }
+    Serial.println(String("  Failed to find Automation!"));
+  }
+
+  //   void checkAllAutomations() {
+  //     if (automations.size() == 0)
+  //       return;
+  //
+  //     Serial.println(String("Checking all # Automation: ") +
+  //     automations.size());
+  //
+  //     for (auto it = automations.begin(); it != automations.end(); ++it) {
+  //       yield();
+  //       Serial.println(String("Checking Automation: ") + it->id);
+  //       if (checkCondition(it->condId)) {
+  //         Serial.println(String("  Triggered Automation || topic: ") +
+  //         it->topic +
+  //                        String(" | data: ") + it->data);
+  //         client.publish(it->topic.c_str(), it->data.c_str(), false);
+  //       } else {
+  //         Serial.println("  Condition for Automation was not satisfied!");
+  //       }
+  //     }
+  //     Serial.println(String("  Failed to find Automation!"));
+  //   }
 } device;
 
 struct _alpha {
@@ -562,7 +765,7 @@ private:
     device.publish(stateTopic.c_str(), String(newValue).c_str(), retain);
     listener(newValue);
 
-    device.checkAutomation(name, (uint32_t)newValue);
+    // device.checkAutomation(name, (uint32_t)newValue);
   }
 
 public:
@@ -613,7 +816,7 @@ private:
     device.publish(stateTopic.c_str(), newState ? "ON" : "OFF", retain);
     listener(newState);
 
-    device.checkAutomation(name, (uint32_t)state);
+    // device.checkAutomation(name, (uint32_t)state);
   }
 
 public:
@@ -639,7 +842,31 @@ public:
   void onChange(std::function<void(bool)> _listener) { listener = _listener; }
 } beta;
 
-void _ha_device_init_features() {
-  alpha._init();
-  beta._init();
+struct _resbtn {
+private:
+  const String name = "Restart";
+
+  const String commandTopic = "homeassistant/button/restart/command";
+
+  std::function<void(void)> listener = []() {};
+
+public:
+  void _init() {
+    device.clearRetain(commandTopic.c_str());
+    device.subscribe(commandTopic.c_str(), [this](String message) {
+      if (message != "PRESS")
+        return;
+      listener();
+    });
+  }
+
+  // only one listener will work, newest overwrites previous
+  void onPress(std::function<void(void)> _listener) { listener = _listener; }
+} resbtn;
+
+void _ha_device_init_features()
+{
+    alpha._init();
+    beta._init();
+    resbtn._init();
 }
