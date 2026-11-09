@@ -13,7 +13,7 @@ steps:
     #   for pkg in corosync pacemaker pacemaker-cli-utils pcs; do dpkg -s "$pkg"; done
     script: |
       printf '%s' "$SECRET" | passwd hacluster -s
-  - name: Erstelle systemd-service für ens19
+  - name: Erstelle systemd-service für ens19 # TODO: networkctl instead of ip better - while not ideal, maybe inotify but for interfaces?
     user: root
     check: |
       [ -e /etc/systemd/system/ens19.service ]

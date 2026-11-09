@@ -21,8 +21,7 @@ steps:
   - name: Konfiguriere /home/hammer
     user: root
     check: |
-      ! systemctl is-active user@955
-      [ -e /home/hammer/.config/containers ] && [ -e /home/hammer/quadlet ] && [ -e /home/hammer/.bashrc ] && [[ "$(stat -c '%a %u:%g' /home/hammer)" == '700 955:955' ]]
+      ! systemctl is-active user@955 || ([ -e /home/hammer/.config/containers ] && [ -e /home/hammer/quadlet ] && [ -e /home/hammer/.bashrc ] && [[ "$(stat -c '%a %u:%g' /home/hammer)" == '700 955:955' ]])
     script: |
       mkdir -p /home/hammer/.config/containers
       mkdir -p /home/hammer/quadlet
@@ -42,9 +41,9 @@ steps:
       - DOMAIN
       - ACME_EMAIL
     check: |
-      [ -L /etc/haproxy ]
+      [ -L /etc/haproxy ] && [ -e /etc/haproxy/haproxy.cfg ]
     script: |
-      mkdir -p /etc/haproxy/ssl
+      mkdir -p /etc/haproxy/{ssl,conf.d}
 
       cat > /etc/haproxy/acme.sh <<-'EOF'
       #!/bin/bash
@@ -156,8 +155,10 @@ steps:
         server s1 127.0.0.1:1883
       EOF
 
-      mv /etc/haproxy /home/haproxy
-      ln -s /home/haproxy /etc/haproxy
+      if ! [ -L /etc/haproxy ]; then
+          mv /etc/haproxy /home/haproxy
+          ln -s /home/haproxy /etc/haproxy
+      fi
   - name: Starte HAProxy
     user: root
     check: |
@@ -200,7 +201,7 @@ steps:
       EOF
 
       systemctl --user daemon-reload
-  - name: Konfiguriere Applikation - Mosquitto MQTT Broker # TODO: acl & limit permissions for homeassistant/#
+  - name: Konfiguriere Applikation - Mosquitto MQTT Broker
     user: hammer
     env:
       - $MQTT_HOME_PASS
@@ -286,13 +287,13 @@ steps:
       frontend:
         themes: !include_dir_merge_named themes
 
-      automation: !include automations.yaml
-      script: !include scripts.yaml
-      scene: !include scenes.yaml
+      #automation: !include automations.yaml
+      #script: !include scripts.yaml
+      #scene: !include scenes.yaml
 
       sensor:
         - platform: rest
-          resource: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$VM_ID1/status/current"
+          resource: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$PVE_ID1/status/current"
           method: GET
           verify_ssl: false
           name: Node1 Status
@@ -312,7 +313,7 @@ steps:
             - netout
 
         - platform: rest
-          resource: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$VM_ID2/status/current"
+          resource: "https://$PVE_IP:8006/api2/json/nodes/pve/qemu/$PVE_ID2/status/current"
           method: GET
           verify_ssl: false
           name: Node2 Status
@@ -520,15 +521,20 @@ steps:
       systemctl --user restart mosquitto
   - name: Konfiguriere MQTT Benutzer
     user: hammer
+    env:
+      - $MQTT_HOME_PASS
+      - $MQTT_DEVS_PASS
     check: |
       [ -e ~/mqtt/config/pwds.conf ]
     script: |
+      if ! grep -q '^password_file '; then
       cat >> ~/mqtt/config/mosquitto.conf <<-EOF
       password_file /mosquitto/config/pwds.conf
       acl_file /mosquitto/config/acl.conf
       EOF
+      fi
 
-      podman exec mosquitto mosquitto_passwd -cb /mosquitto/config/pwds.conf home "$MQTT_HOME_PASS"
+      podman exec mosquitto mosquitto_passwd -b -c /mosquitto/config/pwds.conf home "$MQTT_HOME_PASS"
       podman exec mosquitto mosquitto_passwd -b /mosquitto/config/pwds.conf devs "$MQTT_DEVS_PASS"
 
       systemctl --user restart mosquitto
@@ -541,11 +547,9 @@ steps:
   - name: Authentifiziere Cluster Nodes
     user: root
     env:
-      - IP1
-      - IP2
       - $SECRET
     script: |
-      pcs host auth node1 addr="$IP1" node2 addr="$IP2" -u hacluster -p "$SECRET"
+      pcs host auth node1 node2 -u hacluster -p "$SECRET"
   - name: Erstelle Cluster "ham"
     user: root
     env:
@@ -675,5 +679,6 @@ steps:
     user: root
     skip: Möchten Sie einen Netzwerkverlust simulieren, um STONITH zu testen? (diese VM wird neugestartet)
     script: |
+      nft flush ruleset
       nft add table inet isolate
       nft add chain inet isolate input '{ type filter hook input priority 0; policy drop; }'

@@ -6,6 +6,8 @@
 { set -a; source ./node.env; set +a; }
 
 # it is expected that you have already configured cert-auth via ssh-copy-id
-scp node.{sh,env} "root@$IP1:/root"
+[-e .env] && scp .env "root@$IP1:/root/node.env"
+scp node.env "root@$IP1:/root/.env"
+scp node.sh "root@$IP1:/root"
 scp node.env "root@$IP2:/root/peer.env"
 scp peer.sh "root@$IP2:/root"

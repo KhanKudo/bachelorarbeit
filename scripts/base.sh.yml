@@ -18,7 +18,7 @@ steps:
       apt-get install -y systemd-timesyncd
 
       systemctl enable --now systemd-timesyncd
-  - name: Konfiguriere Hostnamen
+  - name: Konfiguriere Hostnamen # TODO: better networkctl --json instead of ip addr
     user: root
     env:
       - IP1
@@ -69,11 +69,12 @@ steps:
       - IP1
       - IP2
     check: |
-      grep -qw 'policy' /etc/nftables.conf
+      true # skip for now, there is some odd conflict with nftables & corosync
+      # grep -qw 'policy' /etc/nftables.conf
     script: |
       peer_ip="$([[ "$(hostnamectl hostname)" == 'node1' ]] && echo -n "$IP2" || echo -n "$IP1")"
 
-      cat >> /etc/nftables.conf <<-EOF
+      cat > /etc/nftables.conf <<-EOF
       #!/usr/sbin/nft -f
 
       flush ruleset
@@ -86,18 +87,18 @@ steps:
 
         		ct state invalid drop
 
-        		iifname "lo" accept
+        		iif lo accept
 
         		ip protocol icmp accept
 
         		# SSH
-      		  iifname "ens18" tcp dport 22 accept
+      		  iif ens18 tcp dport 22 accept
 
         		# Peer Node
-      		  iifname "ens18" ip saddr $peer_ip/32 accept
+      		  iif ens18 ip saddr $peer_ip/32 accept
 
         		# Home Assistant & Mosquitto
-        		iifname "ens19" tcp dport { 80, 443, 8883 } accept
+        		iif ens19 tcp dport { 80, 443, 8883 } accept
        	}
        	chain forward {
         		type filter hook forward priority filter; policy drop;
