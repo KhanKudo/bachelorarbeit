@@ -1,4 +1,5 @@
 .directory
 .env
+target
 scripts/node.sh
 scripts/peer.sh
