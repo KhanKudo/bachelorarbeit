@@ -1,0 +1,74 @@
+# example of a number slider and a switch:
+# when the slider is set to the maximum of 255, the switch must be on
+# when the slider is set to the minimum of 0, the switch must be off
+# when the switch is turned off, the slider must get set to 0
+# when the switch is turned on, the slider must get set to 255
+a = INT(homeassistant/number/alpha/state)
+b = LEN(homeassistant/switch/beta/state)
+
+OFF = 3
+ON  = 2
+MIN = 0
+MAX = 255
+
+off = b == OFF
+on  = b == ON
+
+min = a == MIN
+max = a == MAX
+
+to_min = off && !min
+to_max = on && !max
+
+to_off = min && !off
+to_on  = max && !on
+
+a
+to_off
+homeassistant/switch/beta/command
+OFF
+
+a
+to_on
+homeassistant/switch/beta/command
+ON
+
+b
+to_min
+homeassistant/number/alpha/command
+0
+
+b
+to_max
+homeassistant/number/alpha/command
+255
+
+# rules of the syntax:
+# - a comment is marked by a hashtag
+# - sources are always defined in parentheses prefixed by their type RAW/INT/LEN
+# - variables are defined with = and are globally valid. Order of definition has no effect. Re-definition is forbidden.
+# - unless a comment, everything is treated as a condition
+# - an action is defined across multiple text-lines in order of: an empty line, a trigger source, a condition, a target topic, a data-string(can span multiple lines), an empty line
+
+# rules for conditions:
+# - parentheses are allowed
+# - sources may be implicitly used as conditions. They will internally get converted into the condition `X != 0` as in `SRC notequal 0`
+# - gates may contain more than two inputs. They will internally get converted into multiple two-input gates behind a master gate
+# - comparators may contain more than two inputs. They will internally get split into multiple two-input comparators behind a master gate
+
+# definitions of gates:
+# AND  is  &&
+# OR   is  ||
+# NOT  is  !   when  used as !A, implemented as inversion of src `X == 0` or as copy of condition-gate with same inputs but negated
+# NOR  is  !   when  used as !(A || B)
+# NAND is  !   when  used as !(A && B)
+# XOR  is  !=  when  A and B are conditions
+
+# definitions of comparators:
+# EQ   is  ==  when  A/B is a constant and B/A is a source  |  A and B are sources
+# XNOR is  ==  when  A and B are conditions
+# NEQ  is  !=  when  A/B is a constant and B/A is a source  |  A and B are sources
+# GT   is  >
+# LT   is  <
+# GTE  is  >=
+# LTE  is  <=
