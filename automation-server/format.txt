@@ -44,9 +44,9 @@ homeassistant/number/alpha/command
 255
 
 # rules of the syntax:
-# - a comment is marked by a hashtag
+# - a comment is marked by a hashtag explicitly at the start of the line, inline comments are not allowed
 # - sources are always defined in parentheses prefixed by their type RAW/INT/LEN
-# - variables are defined with = and are globally valid. Order of definition has no effect. Re-definition is forbidden.
+# - variables are immortal & immutable, defined with = and only usable after definition. Re-definitions are not supported.
 # - unless a comment, everything is treated as a condition
 # - an action is defined across multiple text-lines in order of: an empty line, a trigger source, a condition, a target topic, a data-string(can span multiple lines), an empty line
 
@@ -59,14 +59,14 @@ homeassistant/number/alpha/command
 # definitions of gates:
 # AND  is  &&
 # OR   is  ||
+# XOR  is  ^^
 # NOT  is  !   when  used as !A, implemented as inversion of src `X == 0` or as copy of condition-gate with same inputs but negated
 # NOR  is  !   when  used as !(A || B)
 # NAND is  !   when  used as !(A && B)
-# XOR  is  !=  when  A and B are conditions
+# XNOR is  !   when  used as !(A %% B)
 
 # definitions of comparators:
 # EQ   is  ==  when  A/B is a constant and B/A is a source  |  A and B are sources
-# XNOR is  ==  when  A and B are conditions
 # NEQ  is  !=  when  A/B is a constant and B/A is a source  |  A and B are sources
 # GT   is  >
 # LT   is  <
