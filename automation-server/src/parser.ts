@@ -1,6 +1,8 @@
 
 // -----
 
+import { readFileSync } from "fs"
+
 const refs: Map<string, Number | Source | Condition | Action> = new Map()
 let internalRefCount = 0
 function internalRef(value: Number | Source | Condition | Action): string {
@@ -30,7 +32,7 @@ class Source {
     else if (ref)
       lineError(`Variable is not a Source!`, line)
 
-    const [match, type, topic] = line.match(new RegExp(`^(${Object.keys(SrcType).join('|')})\((.+)\)$`)) ?? []
+    const [match, type, topic] = line.match(new RegExp(`^(${Object.keys(SrcType).join('|')})\\((.+)\\)$`)) ?? []
     if (!match || !topic)
       lineError(`Couldn't parse Source!`, line)
 
@@ -48,6 +50,15 @@ class Source {
 
   constructor(readonly topic: string, readonly type: SrcType) {
     Source.all.push(this)
+  }
+
+  toJSON() {
+    return {
+      id: this.getId(),
+      type: this.type,
+      topic: this.topic,
+      state: 0,
+    }
   }
 }
 
@@ -142,11 +153,11 @@ class Condition<T extends CondType = CondType> {
         if (typeof a === 'number' && typeof b === 'number') {
           throw new Error(`Comparisons between two constants are not allowed: "${group}"`)
         } else if (a instanceof Source && b instanceof Source) {
-          comps.push(new Condition(a, b, compMap[comp as keyof typeof CompType]))
+          comps.push(new Condition(a, b, compMap[comp as keyof typeof CompType]!))
         } else if (a instanceof Source && typeof b === 'number') {
-          comps.push(new Condition(a, b, compMap[comp as keyof typeof CompType]))
+          comps.push(new Condition(a, b, compMap[comp as keyof typeof CompType]!))
         } else if (typeof a === 'number' && b instanceof Source) {
-          comps.push(new Condition(b, a, mirroredCompMap[comp as keyof typeof CompType]))
+          comps.push(new Condition(b, a, mirroredCompMap[comp as keyof typeof CompType]!))
         } else {
           throw new Error(`Invalid types found for comparison! group: "${group}" a: "${a}", b: "${b}"`)
         }
@@ -155,7 +166,7 @@ class Condition<T extends CondType = CondType> {
       })
 
       if (comps.length === 1)
-        return internalRef(comps[0])
+        return internalRef(comps[0]!)
 
       return internalRef(Condition.fromChain(GateType.AND, ...comps))
     })
@@ -170,8 +181,8 @@ class Condition<T extends CondType = CondType> {
       line = line.replace(new RegExp(`[a-zA-Z_0-9]+(?:${gate.replace(/(.)/g, '\\$1')}[a-zA-Z_0-9]+)+`, 'g'), (group) => {
         const gates = group.split(gate).map(elem => Condition.from(elem))
         if (gates.length === 1)
-          return internalRef(gates[0])
-        return internalRef(Condition.fromChain(gateOrder[gate], ...gates))
+          return internalRef(gates[0]!)
+        return internalRef(Condition.fromChain(gateOrder[gate]!, ...gates))
       })
     }
 
@@ -189,14 +200,14 @@ class Condition<T extends CondType = CondType> {
 
       while (cur.length > 1) {
         for (let i = 0; i < cur.length; i += 2) {
-          nxt.push(new Condition<GateType>(cur[i], cur[i + 1], type))
+          nxt.push(new Condition<GateType>(cur[i]!, cur[i + 1]!, type))
         }
         cur = nxt
         nxt = []
       }
 
       if (inputs.length % 2) {
-        return new Condition(nxt[0], inputs.at(-1)!, type)
+        return new Condition(nxt[0]!, inputs.at(-1)!, type)
       }
       else {
         return cur[0] as Condition<GateType>
@@ -257,6 +268,23 @@ class Condition<T extends CondType = CondType> {
 
     return new Condition(this.a as any, this.b as any, negType as any)
   }
+
+  toJSON() {
+    if (this.b instanceof Source)
+      return {
+        id: this.getId(),
+        type: this.type,
+        a: Math.min(this.a.getId(), this.b.getId()) | (Math.max(this.a.getId(), this.b.getId()) << 16),
+        b: 0,
+      }
+    else
+      return {
+        id: this.getId(),
+        type: this.type,
+        a: this.a.getId(),
+        b: typeof this.b === 'number' ? this.b : (this.b as Condition).getId(),
+      }
+  }
 }
 
 // -----
@@ -269,21 +297,33 @@ class Action {
   }
 
   destroy() {
+    console.log(`! Destroy Action ${this.topic} "${this.data}" !`)
     Action.all.splice(this.getId(), 1)
   }
 
   constructor(readonly trigger: Source, readonly condition: Condition, readonly topic: string, readonly data: string) {
     Action.all.push(this)
   }
+
+  toJSON() {
+    return {
+      id: this.getId(),
+      condId: this.condition.getId(),
+      triggerSrc: this.trigger.getId(),
+      topic: this.topic,
+      data: this.data,
+    }
+  }
 }
 
 // -----
 
-async function parse(file: string) {
-  //@ts-ignore
-  const lines: string[] = (await Bun.file(file).text()).split('\n')
+export function parseTxt(file: string) {
+  const lines: string[] = readFileSync(file).toString().split('\n')
 
   lineError = (err, line) => { throw new Error(`${err}!\n\tLine ${lines.indexOf(line)}: "${line}"`) }
+
+  let targetDevice: string | null = null
 
   let lastEmpty: boolean = true
   let actionTrigger: Source | null = null
@@ -322,7 +362,7 @@ async function parse(file: string) {
       continue
     }
 
-    if (lastEmpty) {
+    if (lastEmpty && targetDevice) {
       try {
         actionTrigger = Source.from(line)
         continue // lastEmpty stays true
@@ -331,10 +371,16 @@ async function parse(file: string) {
 
     lastEmpty = false
 
+    if (!targetDevice) {
+      console.log(`Set Target Device: "${line}"`)
+      targetDevice = line
+      continue
+    }
+
     // line must be an assigned if not matched yet
     const [match, ref, value] = line.match(/^([a-zA-Z][a-zA-Z_0-9]*)\s*=\s*(.*)$/) ?? []
-    if (!match)
-      lineError(`Could not match name of assigned variable!`, line)
+    if (!match || !ref || !value)
+      lineError(`Could not match assignment of variable!`, line)
 
     if (refs.has(ref))
       lineError(`Duplicate definition of variable "${ref}"!`, line)
@@ -389,27 +435,44 @@ async function parse(file: string) {
   for (const cond of unusedConditions)
     cond.destroy()
 
+
+  const result = {
+    target: targetDevice,
+    sources: [] as ReturnType<InstanceType<typeof Source>['toJSON']>[],
+    conditions: [] as ReturnType<InstanceType<typeof Condition>['toJSON']>[],
+    actions: [] as ReturnType<InstanceType<typeof Action>['toJSON']>[],
+  }
+
   // for debugging, write a txt file
 
-  let txt = `# Resulting output ${new Date().toString()}\n\n`
+  let txt = `# Result output ${new Date().toString()}\n\n`
 
-  for (const src of Source.all)
+  txt += `Target: ${targetDevice}\n\n`
+
+  for (const src of Source.all) {
     txt += `Source #${src.getId()}: ${SrcType[src.type]} | ${src.topic}\n`
+    result.sources.push(src.toJSON())
+  }
   txt += `\n`
 
-  for (const cond of Condition.all)
+  for (const cond of Condition.all) {
     txt += `Condition #${cond.getId()}: ${CompType[cond.type] ?? GateType[cond.type]} | ${cond.a?.getId?.() ?? cond.a} | ${(cond.b as any)?.getId?.() ?? cond.b}\n`
+    result.conditions.push(cond.toJSON())
+  }
   txt += `\n`
 
-  for (const act of Action.all)
+  for (const act of Action.all) {
     txt += `Action #${act.getId()}: WHEN ${act.trigger.getId()} IF ${act.condition.getId()} DO ${act.topic} WITH ${act.data}\n`
+    result.actions.push(act.toJSON())
+  }
   txt += `\n# End\n`
 
   console.log('!!!FINISHED!!!')
+  console.log('')
+  console.log('')
+  console.log('=====  SUMMARY  =====')
+  console.log('')
+  console.log(txt)
 
-  //@ts-ignore
-  await Bun.file('./out.txt').write(txt)
+  return result
 }
-
-//@ts-ignore
-await parse('./format.txt')

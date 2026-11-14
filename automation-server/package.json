@@ -1,0 +1,19 @@
+{
+  "name": "automation-server",
+  "main": "src/main.ts",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "scripts": {
+    "dry": "bun run src/main.ts --dry",
+    "deploy": "bun run src/main.ts",
+    "watch": "bun run src/main.ts --watch"
+  },
+  "private": true,
+  "dependencies": {
+    "mqtt": "^5.16.1"
+  }
+}

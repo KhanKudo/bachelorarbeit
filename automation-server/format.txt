@@ -3,6 +3,10 @@
 # when the slider is set to the minimum of 0, the switch must be off
 # when the switch is turned off, the slider must get set to 0
 # when the switch is turned on, the slider must get set to 255
+
+# Target device running the automations
+home/tester
+
 a = INT(homeassistant/number/alpha/state)
 b = LEN(homeassistant/switch/beta/state)
 
