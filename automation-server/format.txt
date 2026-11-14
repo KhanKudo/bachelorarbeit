@@ -11,6 +11,8 @@ ON  = 2
 MIN = 0
 MAX = 255
 
+none = b == 0
+
 off = b == OFF
 on  = b == ON
 
