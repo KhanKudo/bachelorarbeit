@@ -4,7 +4,7 @@
 # when the switch is turned off, the slider must get set to 0
 # when the switch is turned on, the slider must get set to 255
 
-# Target device running the automations
+# Target device running the automations (the base-topic as first non-empty and non-comment line of txt)
 home/tester
 
 a = INT(homeassistant/number/alpha/state)

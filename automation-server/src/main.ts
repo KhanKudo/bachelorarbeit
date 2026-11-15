@@ -1,5 +1,5 @@
 import { connect, MqttClient } from 'mqtt'
-import { parseTxt } from './parser'
+import { parseTxt } from './parseTxt'
 import { readdirSync } from 'fs'
 import EventEmitter from 'events'
 
@@ -32,7 +32,9 @@ const client = DRYRUN ? Object.assign(new EventEmitter() as unknown as MqttClien
 if (DRYRUN)
   Bun.sleep(1000).then(() => client.emit('connect', null as any))
 
-const files = readdirSync('./automations')
+const AUTOMATION_DIR = './automations'
+
+const files = readdirSync(AUTOMATION_DIR)
 
 const queue: Map<string, string> = new Map()
 let redundantPublishes: number = 0
@@ -58,7 +60,7 @@ client.on('message', (topic, data) => {
 
 client.on('connect', async () => {
   for (const file of files) {
-    const { target, sources, conditions, actions } = parseTxt(file)
+    const { target, sources, conditions, actions } = parseTxt(AUTOMATION_DIR + '/' + file)
 
     queue.clear()
     redundantPublishes = 0
