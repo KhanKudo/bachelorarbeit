@@ -1,20 +1,29 @@
-import { fetch } from "bun";
+import { fetch } from "bun"
+import { readFileSync } from "fs"
 
+if (!import.meta.env.HA_URL)
+  throw new Error('Missing required HA_URL environment variable!')
 if (!import.meta.env.HA_TOKEN)
   throw new Error('Missing required HA_TOKEN environment variable!')
 
-// console.log(JSON.parse('[' + (await (await fetch('https://bachelor.milenkovic.cloud/api/template', {
-//   method: 'POST',
-//   headers: {
-//     'Authorization': `Bearer ${import.meta.env.HA_TOKEN}`
-//   },
-//   body: `{"template":"{{ device_attr('switch.bedroom_tester_beta', 'identifiers') }}"}`,
-// })).text()).slice(2, -2).replaceAll("'", '"') + ']'))
+const URL = import.meta.env.HA_URL
 
-console.log((await (await fetch('https://bachelor.milenkovic.cloud/api/template', {
-  method: 'POST',
-  headers: {
-    'Authorization': `Bearer ${import.meta.env.HA_TOKEN}`
-  },
-  body: `{"template":"{{ device_attr('switch.bedroom_tester_beta', 'identifiers') }}"}`,
-})).text()).match(/^{\('mqtt', '([^']+)'\)}$/)?.[1])
+async function entityToSource(entityId: string): Source {
+  const devId = (await (await fetch(URL + '/api/template', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${import.meta.env.HA_TOKEN}`
+    },
+    body: `{"template":"{{ device_attr('${entityId}', 'identifiers') }}"}`,
+  })).text()).match(/^{\('mqtt', '([^']+)'\)}$/)?.[1]
+
+
+}
+
+export function parseHomeAssistant() {
+  const automations = Bun.YAML.parse(readFileSync('automations.yaml'))
+}
+
+if (import.meta.main) {
+  parseHomeAssistant()
+}

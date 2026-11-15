@@ -239,7 +239,6 @@ export class Condition<T extends CondType = CondType> {
   }
 
   toJSON() {
-    console.log(this)
     if (this.b instanceof Source)
       return {
         id: this.getId(),
