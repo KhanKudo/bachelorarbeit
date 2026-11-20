@@ -2,11 +2,11 @@
   alias: Test 50 -> OFF
   description: ''
   triggers:
-  - trigger: numeric_state
+  - trigger: state
     entity_id:
     - number.bedroom_tester_alpha
-    below: 51
-    above: 49
+    to:
+    - '50'
   conditions:
   - condition: switch.is_on
     target:

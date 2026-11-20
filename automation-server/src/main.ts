@@ -2,6 +2,8 @@ import { parseTxt } from './parseTxt'
 import { readdirSync } from 'fs'
 import { WATCH } from './flags'
 import { publish, disconnect, subscribe, connected, clearRetain } from './mqtt'
+import type { Automation } from './core'
+import { parseHomeAssistant } from './parseHA'
 
 if (WATCH)
   throw new Error('Watch-Mode not yet supported!')
@@ -12,9 +14,18 @@ const files = readdirSync(AUTOMATION_DIR)
 
 await connected
 
+function parseFile(filePath: string): Promise<Automation> {
+  if (filePath.endsWith('.txt'))
+    return parseTxt(AUTOMATION_DIR + '/' + filePath)
+  else if (filePath.endsWith('.yaml'))
+    return parseHomeAssistant(AUTOMATION_DIR + '/' + filePath)
+  else
+    throw new Error(`Could not parse unsupported file type: "${filePath}"`)
+}
+
 for (const file of files) {
   console.log(`[ Parsing "${file}" ]`)
-  const { target, sources, conditions, actions } = parseTxt(AUTOMATION_DIR + '/' + file)
+  const { target, sources, conditions, actions } = await parseFile(file)
 
   const queue: Map<string, string> = new Map()
   let needDeviceReload = false

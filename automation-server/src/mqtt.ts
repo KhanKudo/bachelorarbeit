@@ -18,7 +18,7 @@ const client = DRYRUN ? Object.assign(new EventEmitter() as unknown as MqttClien
 })
 
 if (DRYRUN)
-  Bun.sleep(1000).then(() => client.emit('connect', null as any))
+  setTimeout(() => client.emit('connect', null as any), 100)
 
 const subscriptions = new Map<RegExp, (msg: string, topic: string) => void | number | null | Promise<void | number | null>>()
 
@@ -45,6 +45,9 @@ export function publish(topic: string, message: string = '', retain: boolean = f
 
 export async function subscribe(topic: string, listener?: typeof subscriptions extends Map<any, infer V> ? V : never, initialTimeout?: number) {
   if (listener) {
+    if (DRYRUN && initialTimeout !== undefined)
+      return console.log(`(dryrun): MQTT Subscribe to topic "${topic}" with an initial Timeout of ${initialTimeout}ms (skipping wait time due to dryrun)`)
+
     return new Promise<void>((resolve, reject) => {
       let timer: NodeJS.Timeout | null = null
       const regex = new RegExp(`^${topic.replace(/\+/g, '[^/]+').replace(/#/g, '.*')}$`)

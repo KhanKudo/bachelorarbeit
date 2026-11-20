@@ -1,5 +1,6 @@
 import { readFileSync } from "fs"
-import { CompType, Action, Condition, Source, SrcType, type CondType, GateType } from "./core"
+import { CompType, Action, Condition, Source, SrcType, type CondType, GateType, type Automation, createAutomation } from "./core"
+import { connected, disconnect } from "./mqtt"
 
 const refs: Map<string, number | Source | Condition> = new Map()
 let internalRefCount = 0
@@ -125,167 +126,111 @@ function conditionFromString(line: string, depth: number = order.length): Condit
 
 // -----
 
-export function parseTxt(file: string) {
-  const lines: string[] = readFileSync(file).toString().split('\n')
+export async function parseTxt(file: string): Promise<Automation> {
+  return createAutomation(async () => {
+    const lines: string[] = readFileSync(file).toString().split('\n')
 
-  lineError = (err, line) => { throw new Error(`${err}!\n\tLine ${lines.indexOf(line)}: "${line}"`) }
+    lineError = (err, line) => { throw new Error(`${err}!\n\tLine ${lines.indexOf(line)}: "${line}"`) }
 
-  let targetDevice: string | null = null
+    let targetDevice: string | null = null
 
-  let lastEmpty: boolean = true
-  let actionTrigger: Source | null = null
-  let actionCondition: Condition | null = null
-  let actionTopic: string | null = null
-  let actionData: string | null = null
-  for (const line of lines) {
-    if (actionTrigger !== null) {
-      if (actionData !== null) {
-        if (line.length === 0) {
-          new Action(actionTrigger!, actionCondition!, actionTopic!, actionData)
-          actionTrigger = null
-          actionCondition = null
-          actionTopic = null
-          actionData = null
+    let lastEmpty: boolean = true
+    let actionTrigger: Source | null = null
+    let actionCondition: Condition | null = null
+    let actionTopic: string | null = null
+    let actionData: string | null = null
+    for (const line of lines) {
+      if (actionTrigger !== null) {
+        if (actionData !== null) {
+          if (line.length === 0) {
+            new Action(actionTrigger!, actionCondition!, actionTopic!, actionData)
+            actionTrigger = null
+            actionCondition = null
+            actionTopic = null
+            actionData = null
+          } else {
+            actionData += '\n' + line
+          }
+        } else if (actionTopic !== null) {
+          actionData = line
+        } else if (actionCondition !== null) {
+          actionTopic = line
         } else {
-          actionData += '\n' + line
+          actionCondition = conditionFromString(line)
         }
-      } else if (actionTopic !== null) {
-        actionData = line
-      } else if (actionCondition !== null) {
-        actionTopic = line
-      } else {
-        actionCondition = conditionFromString(line)
+        continue
       }
-      continue
-    }
 
-    // ignore comments
-    if (line[0] === '#')
-      continue
+      // ignore comments
+      if (line[0] === '#')
+        continue
 
-    // keep track of and skip empty lines
-    if (line.length === 0) {
-      lastEmpty = true
-      continue
-    }
+      // keep track of and skip empty lines
+      if (line.length === 0) {
+        lastEmpty = true
+        continue
+      }
 
-    if (lastEmpty && targetDevice) {
+      if (lastEmpty && targetDevice) {
+        try {
+          actionTrigger = sourceFromString(line)
+          continue // lastEmpty stays true
+        } catch { }
+      }
+
+      lastEmpty = false
+
+      if (!targetDevice) {
+        console.log(`Set Target Device: "${line}"`)
+        targetDevice = line
+        continue
+      }
+
+      // line must be an assigned if not matched yet
+      const [match, ref, value] = line.match(/^([a-zA-Z][a-zA-Z_0-9]*)\s*=\s*(.*)$/) ?? []
+      if (!match || !ref || !value)
+        lineError(`Could not match assignment of variable!`, line)
+
+      if (refs.has(ref))
+        lineError(`Duplicate definition of variable "${ref}"!`, line)
+
+      // check if ref is a constant
+      if (value.match(/^[0-9]+$/)) {
+        console.log(`New Constant "${ref}" -> ${value}`)
+        refs.set(ref, Number.parseInt(value))
+        continue
+      }
+
+      // check if ref is a source
       try {
-        actionTrigger = sourceFromString(line)
-        continue // lastEmpty stays true
+        refs.set(ref, sourceFromString(value))
+        console.log(`New Source "${ref}" -> ${value}`)
+        continue
       } catch { }
+
+      const refVal = refs.get(value)
+      if (refVal) {
+        refs.set(ref, refVal)
+        continue
+      }
+
+      if (line.match(/!!/))
+        lineError('Stacking negations (!) is not allowed!', line)
+
+      // ref must be a condition
+      console.log(`New Condition "${ref}" -> ${value}`)
+      refs.set(ref, conditionFromString(value))
     }
 
-    lastEmpty = false
+    if (!targetDevice)
+      throw new Error('Could not find target device in txt!')
 
-    if (!targetDevice) {
-      console.log(`Set Target Device: "${line}"`)
-      targetDevice = line
-      continue
-    }
+    return targetDevice
+  })
+}
 
-    // line must be an assigned if not matched yet
-    const [match, ref, value] = line.match(/^([a-zA-Z][a-zA-Z_0-9]*)\s*=\s*(.*)$/) ?? []
-    if (!match || !ref || !value)
-      lineError(`Could not match assignment of variable!`, line)
-
-    if (refs.has(ref))
-      lineError(`Duplicate definition of variable "${ref}"!`, line)
-
-    // check if ref is a constant
-    if (value.match(/^[0-9]+$/)) {
-      console.log(`New Constant "${ref}" -> ${value}`)
-      refs.set(ref, Number.parseInt(value))
-      continue
-    }
-
-    // check if ref is a source
-    try {
-      refs.set(ref, sourceFromString(value))
-      console.log(`New Source "${ref}" -> ${value}`)
-      continue
-    } catch { }
-
-    const refVal = refs.get(value)
-    if (refVal) {
-      refs.set(ref, refVal)
-      continue
-    }
-
-    if (line.match(/!!/))
-      lineError('Stacking negations (!) is not allowed!', line)
-
-    // ref must be a condition
-    console.log(`New Condition "${ref}" -> ${value}`)
-    refs.set(ref, conditionFromString(value))
-  }
-
-  // remove unused sources/conditions
-  const unusedSources = new Set(Source.all)
-  const unusedConditions = new Set(Condition.all)
-
-  const checkUsed = (condition: Condition) => {
-    unusedConditions.delete(condition)
-
-    if (condition.a instanceof Source)
-      unusedSources.delete(condition.a)
-    else if (condition.a instanceof Condition)
-      checkUsed(condition.a)
-
-    if (condition.b instanceof Source)
-      unusedSources.delete(condition.b)
-    else if (condition.b instanceof Condition)
-      checkUsed(condition.b)
-  }
-
-  for (const act of Action.all) {
-    unusedSources.delete(act.trigger)
-    checkUsed(act.condition)
-  }
-
-  for (const src of unusedSources)
-    src.destroy()
-  for (const cond of unusedConditions)
-    cond.destroy()
-
-
-  const result = {
-    target: targetDevice,
-    sources: [] as ReturnType<InstanceType<typeof Source>['toJSON']>[],
-    conditions: [] as ReturnType<InstanceType<typeof Condition>['toJSON']>[],
-    actions: [] as ReturnType<InstanceType<typeof Action>['toJSON']>[],
-  }
-
-  // for debugging, write a txt file
-
-  let txt = `# Result output ${new Date().toString()}\n\n`
-
-  txt += `Target: ${targetDevice}\n\n`
-
-  for (const src of Source.all) {
-    txt += `Source #${src.getId()}: ${SrcType[src.type]} | ${src.topic}\n`
-    result.sources.push(src.toJSON())
-  }
-  txt += `\n`
-
-  for (const cond of Condition.all) {
-    txt += `Condition #${cond.getId()}: ${CompType[cond.type] ?? GateType[cond.type]} | ${cond.a?.getId?.() ?? cond.a} | ${(cond.b as any)?.getId?.() ?? cond.b}\n`
-    result.conditions.push(cond.toJSON())
-  }
-  txt += `\n`
-
-  for (const act of Action.all) {
-    txt += `Action #${act.getId()}: WHEN ${act.trigger.getId()} IF ${act.condition.getId()} DO ${act.topic} WITH ${act.data}\n`
-    result.actions.push(act.toJSON())
-  }
-  txt += `\n# End\n`
-
-  console.log('!!!FINISHED!!!')
-  console.log('')
-  console.log('')
-  console.log('=====  SUMMARY  =====')
-  console.log('')
-  console.log(txt)
-
-  return result
+if (import.meta.main) {
+  await connected
+  await parseTxt('automations/example.txt')
+  disconnect()
 }

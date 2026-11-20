@@ -1,7 +1,64 @@
-export function _clear() {
-  Source.all.splice(0)
-  Condition.all.splice(0)
-  Action.all.splice(0)
+import { DRYRUN } from "./flags"
+
+export interface Automation {
+  target: string,
+  sources: ReturnType<InstanceType<typeof Source>['toJSON']>[],
+  conditions: ReturnType<InstanceType<typeof Condition>['toJSON']>[],
+  actions: ReturnType<InstanceType<typeof Action>['toJSON']>[],
+}
+
+export async function createAutomation<T extends unknown[]>(parser: (...args: T) => Promise<string>, ...args: T): Promise<Automation> {
+  const targetDevice = await parser(...args)
+
+  // remove unused sources/conditions
+  const unusedSources = new Set(Source.all)
+  const unusedConditions = new Set(Condition.all)
+
+  const checkUsed = (condition: Condition) => {
+    unusedConditions.delete(condition)
+
+    if (condition.a instanceof Source)
+      unusedSources.delete(condition.a)
+    else if (condition.a instanceof Condition)
+      checkUsed(condition.a)
+
+    if (condition.b instanceof Source)
+      unusedSources.delete(condition.b)
+    else if (condition.b instanceof Condition)
+      checkUsed(condition.b)
+  }
+
+  for (const act of Action.all) {
+    unusedSources.delete(act.trigger)
+    checkUsed(act.condition)
+  }
+
+  for (const src of unusedSources)
+    src.destroy()
+  for (const cond of unusedConditions)
+    cond.destroy()
+
+  console.log('')
+  console.log('=====  SUMMARY  =====')
+  console.log(`# Result output ${new Date().toString()}`)
+  console.log('')
+  console.log(`Target: ${targetDevice}`)
+  console.log('')
+
+  const result = {
+    target: targetDevice,
+    sources: Source.all.map(x => x.toJSON()),
+    conditions: Condition.all.map(x => x.toJSON()),
+    actions: Action.all.map(x => x.toJSON()),
+  }
+
+  console.log('')
+
+  Source.all.length = 0
+  Condition.all.length = 0
+  Action.all.length = 0
+
+  return result
 }
 
 // -----
@@ -20,11 +77,13 @@ export class Source {
   }
 
   destroy() {
-    console.log(`! Destroy Source ${SrcType[this.type]} "${this.topic}" !`)
+    // if (DRYRUN)
+    console.log(`- Destroy Source ${SrcType[this.type]} "${this.topic}"`)
     Source.all.splice(this.getId(), 1)
   }
 
   constructor(readonly topic: string, readonly type: SrcType) {
+    console.log(`+ Create Source ${SrcType[this.type]} "${this.topic}"`)
     const src = Source.all.find(src => src.type === type && src.topic === topic)
     if (src)
       return src
@@ -32,6 +91,8 @@ export class Source {
   }
 
   toJSON() {
+    // if (DRYRUN)
+      console.log(`Source #${this.getId()}: ${SrcType[this.type]} | ${this.topic}`)
     return {
       id: this.getId(),
       type: this.type,
@@ -218,7 +279,8 @@ export class Condition<T extends CondType = CondType> {
   }
 
   destroy() {
-    console.log(`! Destroy Condition ${CompType[this.type] ?? GateType[this.type]} "${this.a}" "${this.b}" !`)
+    // if (DRYRUN)
+      console.log(`! Destroy Condition ${CompType[this.type] ?? GateType[this.type]} "${this.a}" "${this.b}" !`)
     Condition.all.splice(this.getId(), 1)
   }
 
@@ -226,6 +288,7 @@ export class Condition<T extends CondType = CondType> {
   constructor(type: CompType, a: Source, b: number)
   constructor(type: GateType, a: Condition, b: Condition)
   constructor(readonly type: T, readonly a: Source | Condition, readonly b: Source | Condition | number) {
+    console.log(`+ Create Condition ${CompType[this.type] ?? GateType[this.type]} ${JSON.stringify(this.a)} ${JSON.stringify(this.b)}`)
     const cond = Condition.all.find(cond => cond.type === this.type && cond.a === this.a && cond.b === this.b)
     if (cond) {
       return cond as Condition<T>
@@ -234,11 +297,17 @@ export class Condition<T extends CondType = CondType> {
     Condition.all.push(this)
   }
 
-  negate(): Condition<T extends CompType ? CompType : GateType> {
-    return new Condition(Condition.negate(this.type) as any, this.a as any, this.b as any)
+  negate(negate: boolean = true): Condition<T extends CompType ? CompType : GateType> {
+    if (negate)
+      return new Condition(Condition.negate(this.type) as any, this.a as any, this.b as any)
+    else
+      return this as Condition<any>
   }
 
   toJSON() {
+    // if (DRYRUN)
+      console.log(`Condition #${this.getId()}: ${CompType[this.type] ?? GateType[this.type]} | ${this.a?.getId?.() ?? this.a} | ${(this.b as any)?.getId?.() ?? this.b}`)
+
     if (this.b instanceof Source)
       return {
         id: this.getId(),
@@ -266,15 +335,19 @@ export class Action {
   }
 
   destroy() {
-    console.log(`! Destroy Action ${this.topic} "${this.data}" !`)
+    // if (DRYRUN)
+      console.log(`! Destroy Action ${this.topic} "${this.data}" !`)
     Action.all.splice(this.getId(), 1)
   }
 
   constructor(readonly trigger: Source, readonly condition: Condition, readonly topic: string, readonly data: string) {
+    console.log(`+ Create Action ${this.topic} "${this.data}"`)
     Action.all.push(this)
   }
 
   toJSON() {
+    // if (DRYRUN)
+      console.log(`Action #${this.getId()}: WHEN ${this.trigger.getId()} IF ${this.condition.getId()} DO ${this.topic} WITH ${this.data}`)
     return {
       id: this.getId(),
       condId: this.condition.getId(),
